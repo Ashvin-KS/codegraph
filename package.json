@@ -1,0 +1,192 @@
+{
+  "name": "duckgraph",
+  "displayName": "DuckGraph",
+  "description": "Local-first VS Code codebase graph, hover memory, and grounded explanations.",
+  "version": "0.1.0",
+  "publisher": "local-duckgraph",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "vscode": "^1.120.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "llm",
+    "graph",
+    "hover",
+    "local-first",
+    "code-intelligence"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onLanguage:rust",
+    "onLanguage:typescript",
+    "onLanguage:typescriptreact",
+    "onLanguage:python",
+    "onCommand:duckgraph.reindexWorkspace",
+    "onCommand:duckgraph.explainAtCursor",
+    "onCommand:duckgraph.showOrbitGraph",
+    "onCommand:duckgraph.clearCache",
+    "onCommand:duckgraph.confirmInferredEdge",
+    "onCommand:duckgraph.dismissInferredEdge"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "duckgraph.reindexWorkspace",
+        "title": "Reindex Workspace",
+        "category": "DuckGraph",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "duckgraph.explainAtCursor",
+        "title": "Explain Symbol at Cursor",
+        "category": "DuckGraph",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "duckgraph.showOrbitGraph",
+        "title": "Show Orbit Graph",
+        "category": "DuckGraph",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "duckgraph.clearCache",
+        "title": "Clear Explanation Cache",
+        "category": "DuckGraph",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "duckgraph.confirmInferredEdge",
+        "title": "Confirm Inferred Edge",
+        "category": "DuckGraph"
+      },
+      {
+        "command": "duckgraph.dismissInferredEdge",
+        "title": "Dismiss Inferred Edge",
+        "category": "DuckGraph"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "duckgraph.explainAtCursor",
+        "key": "alt+d",
+        "when": "editorTextFocus && !editorReadonly"
+      },
+      {
+        "command": "duckgraph.showOrbitGraph",
+        "key": "ctrl+shift+g",
+        "mac": "cmd+shift+g",
+        "when": "editorTextFocus"
+      }
+    ],
+    "configuration": {
+      "title": "DuckGraph",
+      "properties": {
+        "duckgraph.llamaUrl": {
+          "type": "string",
+          "default": "http://localhost:8080/completion",
+          "description": "Local llama.cpp HTTP completion endpoint. DuckGraph never calls cloud services."
+        },
+        "duckgraph.userLevel": {
+          "type": "string",
+          "enum": [
+            "beginner",
+            "intermediate",
+            "expert"
+          ],
+          "default": "intermediate",
+          "description": "Explanation depth preference used by the prompt router."
+        },
+        "duckgraph.enabledLanguages": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "rust",
+              "typescript",
+              "typescriptreact",
+              "python"
+            ]
+          },
+          "default": [
+            "rust",
+            "typescript",
+            "typescriptreact",
+            "python"
+          ],
+          "description": "Languages DuckGraph indexes and explains."
+        },
+        "duckgraph.hoverMode": {
+          "type": "string",
+          "enum": [
+            "always",
+            "commandOnly"
+          ],
+          "default": "always",
+          "description": "Whether DuckGraph participates in native hovers or only explains via commands."
+        },
+        "duckgraph.indexOnStartup": {
+          "type": "boolean",
+          "default": true,
+          "description": "Index supported workspace files when DuckGraph activates."
+        },
+        "duckgraph.maxEdges": {
+          "type": "number",
+          "default": 15,
+          "minimum": 1,
+          "maximum": 100,
+          "description": "Circuit breaker for highly referenced graph nodes."
+        },
+        "duckgraph.debugGraphJson": {
+          "type": "boolean",
+          "default": false,
+          "description": "Append compact graph JSON to hovers for local debugging."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "clean": "node scripts/clean.mjs",
+    "copy:assets": "node scripts/copy-assets.mjs",
+    "build": "npm run copy:assets && node scripts/build.mjs",
+    "watch": "npm run copy:assets && node scripts/build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "npm run copy:assets && vitest run",
+    "test:extension": "npm run build && node scripts/run-extension-tests.mjs",
+    "package": "npm run build && vsce package --allow-missing-repository --no-dependencies"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.10.0",
+    "chokidar": "^4.0.3",
+    "d3": "^7.9.0",
+    "express": "^5.2.1",
+    "tree-sitter-wasms": "^0.1.13",
+    "web-tree-sitter": "^0.20.8",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.6",
+    "@types/node": "^24.10.1",
+    "@types/supertest": "^6.0.3",
+    "@types/vscode": "^1.120.0",
+    "@typescript-eslint/eslint-plugin": "^8.49.0",
+    "@typescript-eslint/parser": "^8.49.0",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.9.1",
+    "esbuild": "^0.27.0",
+    "eslint": "^9.39.1",
+    "supertest": "^7.1.4",
+    "typescript": "^6.0.3",
+    "vitest": "^4.0.14"
+  }
+}

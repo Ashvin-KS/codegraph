@@ -1,0 +1,28 @@
+{
+  "name": "@kairos-ai/duckgraph-mcp",
+  "version": "0.1.0",
+  "description": "Standalone MCP server for DuckGraph structural code intelligence.",
+  "type": "module",
+  "bin": {
+    "duckgraph-mcp": "./bin/duckgraph-mcp.js"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "keywords": [
+    "mcp",
+    "duckgraph",
+    "kairos",
+    "code-intelligence",
+    "tree-sitter",
+    "graph"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,7 @@
+Copyright (c) 2026 DuckGraph contributors.
+
+All rights reserved.
+
+This project is currently provided for local development and evaluation only.
+No license is granted to copy, publish, distribute, sublicense, or sell this
+software without explicit permission from the copyright holder.
