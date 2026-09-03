@@ -153,5 +153,63 @@ export function total(values: number[]): number {
     expect(graph.nodes.length).toBe(3);
     db.close();
   });
+
+  it("supports decoupled symbol queries, search, overview, impact analysis, and shortest path", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "duckgraph-features-"));
+    tempDirs.push(root);
+    const db = openDuckDatabase(path.join(root, ".duckgraph", "graph.db"));
+    const repository = new GraphRepository(db, root);
+
+    // Nodes: activate, startServer, handleRequest, authenticate
+    db.prepare(`
+      INSERT INTO code_nodes(id, stable_key, name, kind, file, line_start, line_end, commit_hash)
+      VALUES (1, 'k1', 'activate', 'function', 'src/extension.ts', 1, 15, 'c1'),
+             (2, 'k2', 'startServer', 'function', 'src/server.ts', 20, 50, 'c1'),
+             (3, 'k3', 'handleRequest', 'function', 'src/server.ts', 60, 90, 'c1'),
+             (4, 'k4', 'authenticate', 'function', 'src/auth.ts', 10, 30, 'c1')
+    `).run();
+
+    // Call chain: activate -> startServer -> handleRequest -> authenticate
+    db.prepare(`
+      INSERT INTO code_edges(from_id, to_id, type, confidence, dismissed, file_context)
+      VALUES (1, 2, 'calls', 'syntactic', 0, 'src/extension.ts'),
+             (2, 3, 'calls', 'syntactic', 0, 'src/server.ts'),
+             (3, 4, 'calls', 'syntactic', 0, 'src/server.ts')
+    `).run();
+
+    // 1. Decoupled querySubgraph (no file, no line)
+    const decoupled = repository.querySubgraph("handleRequest");
+    expect(decoupled.target).not.toBeNull();
+    expect(decoupled.target?.name).toBe("handleRequest");
+    expect(decoupled.target?.file).toBe("src/server.ts");
+
+    // 2. Search symbols
+    const search = repository.searchSymbols("auth");
+    expect(search.length).toBe(1);
+    expect(search[0]?.name).toBe("authenticate");
+
+    // 3. Overview
+    const overview = repository.getOverview(5);
+    expect(overview.entrypoints.some((e) => e.name === "activate")).toBe(true);
+    expect(overview.stats.indexedNodes).toBe(4);
+    expect(overview.stats.totalEdges).toBe(3);
+
+    // 4. Impact analysis (who is impacted if authenticate changes?)
+    const impact = repository.getImpactAnalysis("authenticate");
+    expect(impact).not.toBeNull();
+    expect(impact?.dependents_count).toBe(3); // handleRequest (depth 1), startServer (depth 2), activate (depth 3)
+    const depNames = impact?.dependents.map((d) => d.name);
+    expect(depNames).toContain("handleRequest");
+    expect(depNames).toContain("startServer");
+    expect(depNames).toContain("activate");
+
+    // 5. Shortest path (activate -> authenticate)
+    const pathRes = repository.findShortestPath("activate", "authenticate");
+    expect(pathRes.found).toBe(true);
+    expect(pathRes.depth).toBe(3);
+    expect(pathRes.path).toEqual(["activate", "startServer", "handleRequest", "authenticate"]);
+
+    db.close();
+  });
 });
 

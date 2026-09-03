@@ -215,17 +215,49 @@ Env: `CODEGRAPH_WORKSPACE`, `CODEGRAPH_LOCKFILE`, `CODEGRAPH_DB`, `CODEGRAPH_GLO
 
 ---
 
-## MCP tools
+## Agent Playbook: Recommended Tool Execution Order
 
-Primary (`codegraph_*`; `duckgraph_*` aliases for the first six):
+When exploring an unfamiliar codebase, AI agents should follow this step-by-step workflow:
 
-1. `codegraph_index_workspace` — index or force a full re-index.
-2. `codegraph_query_subgraph` — bounded relationship graph for a symbol.
-3. `codegraph_read_source_node` — AST-bounded source block for a symbol.
-4. `codegraph_explain_symbol` — graph facts + bounded source + `summary` + `usage_guidance`.
-5. `codegraph_confirm_edge` — confirm an inferred edge.
-6. `codegraph_dismiss_edge` — reject an inferred edge.
-7. `codegraph_health` — daemon/index stats.
+### Step 1: Orientation & Architecture Discovery (Start Here)
+- **`codegraph_overview`**: Call this FIRST. Returns detected entrypoints (`main`, `activate`, `createApp`), degree-centrality hub symbols with the most callers/callees, languages, and index stats.
+
+### Step 2: Search & Symbol Discovery
+- **`codegraph_search_symbols`**: Fast substring search across the workspace. Returns symbol names, kinds (`function`, `class`, `interface`), files, and line numbers. Use when locating a function without knowing its file path.
+
+### Step 3: Deep Symbol Inspection
+- **`codegraph_explain_symbol`**: Deep inspection of any symbol. Returns verified call relationships, callers, AST-bounded source excerpt, and grounded summary. Can be queried by symbol name alone (searches workspace automatically) or file+line.
+  - Supports `format: "compact"` (token-saving default), `format: "mermaid"` (diagram), or `format: "json"`.
+- **`codegraph_query_subgraph`**: Relationship subgraph showing callers, callees, and type dependencies.
+- **`codegraph_read_source_node`**: Extract AST-bounded code window for a symbol.
+
+### Step 4: Architectural Tracing & Call Paths
+- **`codegraph_find_path`**: Find the shortest call-chain between two symbols (`from_symbol` -> `to_symbol`). Traces how execution flows from entrypoints down to utilities.
+
+### Step 5: Pre-Edit Safety & Impact Analysis
+- **`codegraph_impact_analysis`**: Blast radius analysis. Traces all direct and indirect downstream callers/dependents up to $N$ hops away. Run this BEFORE editing or refactoring a symbol to know what might break.
+
+### Step 6: Maintenance & Incremental Updates
+- **`codegraph_index_workspace`**: Re-index the codebase. Set `dirty_only: true` after editing files to re-index only git-modified files in milliseconds.
+- **`codegraph_health`**: Check database connection and index stats.
+
+---
+
+## MCP Tools Reference
+
+Primary tools (`codegraph_*`; legacy `duckgraph_*` aliases supported):
+
+1. **`codegraph_overview`** — High-level architectural map with entrypoints, centrality hubs, and language distribution.
+2. **`codegraph_search_symbols`** — Substring search across all indexed symbols with kinds, files, and lines.
+3. **`codegraph_explain_symbol`** — Grounded symbol explanation with callers/callees and bounded source excerpt (`compact`, `mermaid`, or `json`).
+4. **`codegraph_query_subgraph`** — Bounded relationship graph for a symbol.
+5. **`codegraph_impact_analysis`** — Blast radius analysis showing all downstream dependents/callers up to $N$ hops away.
+6. **`codegraph_find_path`** — Shortest call chain between two symbols.
+7. **`codegraph_read_source_node`** — AST-bounded source excerpt for a symbol.
+8. **`codegraph_index_workspace`** — Index or re-index the workspace (`dirty_only: true` for fast incremental git updates).
+9. **`codegraph_health`** — Index stats, db path, and health status.
+10. **`codegraph_confirm_edge`** — Confirm an inferred edge.
+11. **`codegraph_dismiss_edge`** — Reject an inferred edge.
 
 ---
 

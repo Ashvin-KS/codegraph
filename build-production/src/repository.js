@@ -125,12 +125,10 @@ export class GraphRepository {
   }
 
   querySubgraph(symbol, file, line, depth = 2, maxEdges = 20) {
-    let target = this.findNode(symbol || "", file, line);
+    const target = this.findTarget(symbol, file, line);
     if (!target) {
-      const containing = this.findContaining(file, line);
-      if (containing && (!symbol || containing.name.toLowerCase() === String(symbol).toLowerCase())) target = containing;
+      return { target: null, nodes: [], edges: [], directional: { calls: [], called_by: [] }, cachedExplanation: null, freshness: "UNINDEXED" };
     }
-    if (!target) return { target: null, nodes: [], edges: [], cachedExplanation: null, freshness: "UNINDEXED" };
 
     const rows = this.db.prepare(`
       WITH RECURSIVE subgraph(node_id, depth) AS (
@@ -159,7 +157,8 @@ export class GraphRepository {
     const edges = ids.length ? this.edgesFor(ids, maxEdges) : [];
     const nodes = rows.map((r) => this.toDto(r));
     const dto = nodes.find((n) => n.id === target.id) ?? this.toDto(target);
-    return { target: dto, nodes, edges, cachedExplanation: target.my_cached_explanation ?? null, freshness: dto.freshness };
+    const directional = this.directionalEdges(target.id, maxEdges);
+    return { target: dto, nodes, edges, directional, cachedExplanation: target.my_cached_explanation ?? null, freshness: dto.freshness };
   }
 
   confirmEdge(id) {
@@ -189,6 +188,205 @@ export class GraphRepository {
     tx();
   }
 
+  findTarget(symbol, file, line) {
+    if (file && line !== undefined && symbol) {
+      const node = this.findNode(symbol, file, line);
+      if (node) return node;
+    }
+    if (symbol) {
+      const byName = this.findSymbolByName(symbol, file);
+      if (byName) return byName;
+    }
+    if (file && line !== undefined) {
+      return this.findContaining(file, line);
+    }
+    return null;
+  }
+
+  findSymbolByName(name, preferredFile) {
+    if (preferredFile) {
+      const nf = normalizeWorkspaceFile(this.workspaceRoot, preferredFile);
+      const inPref = this.db.prepare(`
+        SELECT n.*, mc.description AS my_cached_explanation, mc.verified_commit, sl.reason AS stale_reason
+        FROM code_nodes n
+        LEFT JOIN mind_concepts mc ON mc.node_id = n.id
+        LEFT JOIN staleness_log sl ON sl.node_id = n.id AND sl.re_verified_at IS NULL
+        WHERE n.tombstoned = 0 AND n.file = ? AND n.name = ?
+        ORDER BY (n.line_end - n.line_start) ASC LIMIT 1
+      `).get(nf, name);
+      if (inPref) return inPref;
+    }
+    return this.db.prepare(`
+      SELECT n.*, mc.description AS my_cached_explanation, mc.verified_commit, sl.reason AS stale_reason
+      FROM code_nodes n
+      LEFT JOIN mind_concepts mc ON mc.node_id = n.id
+      LEFT JOIN staleness_log sl ON sl.node_id = n.id AND sl.re_verified_at IS NULL
+      WHERE n.tombstoned = 0 AND n.name = ?
+      ORDER BY (n.line_end - n.line_start) ASC LIMIT 1
+    `).get(name) ?? null;
+  }
+
+  searchSymbols(query, kind, limit = 20) {
+    const cleanLimit = Math.min(Math.max(1, limit), 100);
+    if (kind) {
+      return this.db.prepare(`
+        SELECT id, name, kind, file, line_start, line_end, signature
+        FROM code_nodes
+        WHERE tombstoned = 0 AND kind = ? AND name LIKE ?
+        ORDER BY (name = ?) DESC, LENGTH(name) ASC, file ASC
+        LIMIT ?
+      `).all(kind, `%${query}%`, query, cleanLimit);
+    }
+    return this.db.prepare(`
+      SELECT id, name, kind, file, line_start, line_end, signature
+      FROM code_nodes
+      WHERE tombstoned = 0 AND name LIKE ?
+      ORDER BY (name = ?) DESC, LENGTH(name) ASC, file ASC
+      LIMIT ?
+    `).all(`%${query}%`, query, cleanLimit);
+  }
+
+  getOverview(topN = 10) {
+    const stats = this.stats();
+    const totalEdges = this.db.prepare("SELECT COUNT(*) AS c FROM code_edges WHERE dismissed = 0").get()?.c ?? 0;
+
+    const entrypointNames = ["main", "activate", "init", "start", "run", "app", "createapp", "bootstrap", "handler", "server"];
+    const ph = entrypointNames.map(() => "?").join(",");
+    const entrypoints = this.db.prepare(`
+      SELECT n.id, n.name, n.kind, n.file, n.line_start, n.line_end, n.signature
+      FROM code_nodes n
+      WHERE n.tombstoned = 0 AND LOWER(n.name) IN (${ph})
+      ORDER BY (SELECT COUNT(*) FROM code_edges WHERE to_id = n.id AND dismissed = 0) DESC, n.file ASC
+      LIMIT 15
+    `).all(...entrypointNames);
+
+    const hubs = this.db.prepare(`
+      SELECT n.id, n.name, n.kind, n.file, n.line_start, n.line_end,
+        (SELECT COUNT(*) FROM code_edges WHERE to_id = n.id AND dismissed = 0) AS in_degree,
+        (SELECT COUNT(*) FROM code_edges WHERE from_id = n.id AND dismissed = 0) AS out_degree,
+        ((SELECT COUNT(*) FROM code_edges WHERE to_id = n.id AND dismissed = 0) +
+         (SELECT COUNT(*) FROM code_edges WHERE from_id = n.id AND dismissed = 0)) AS total_degree
+      FROM code_nodes n
+      WHERE n.tombstoned = 0
+      ORDER BY total_degree DESC, n.name ASC
+      LIMIT ?
+    `).all(Math.min(Math.max(1, topN), 50));
+
+    const files = this.db.prepare("SELECT DISTINCT file FROM code_nodes WHERE tombstoned = 0").all();
+    const langCounts = {};
+    for (const r of files) {
+      const idx = r.file.lastIndexOf(".");
+      if (idx !== -1) {
+        const ext = r.file.slice(idx).toLowerCase();
+        langCounts[ext] = (langCounts[ext] || 0) + 1;
+      }
+    }
+
+    return {
+      stats: { indexedFiles: stats.indexedFiles, indexedNodes: stats.indexedNodes, totalEdges },
+      entrypoints,
+      central_hubs: hubs.filter((h) => h.total_degree > 0),
+      languages: langCounts
+    };
+  }
+
+  getImpactAnalysis(symbolName, file, maxDepth = 3) {
+    const target = file ? this.findSymbolByName(symbolName, file) : this.findSymbolByName(symbolName);
+    if (!target) return null;
+
+    const rows = this.db.prepare(`
+      WITH RECURSIVE impact(node_id, depth, chain) AS (
+        SELECT ? AS node_id, 0 AS depth, CAST(? AS TEXT) AS chain
+        UNION
+        SELECT e.from_id, imp.depth + 1, fn.name || ' -> ' || imp.chain
+        FROM code_edges e
+        JOIN impact imp ON e.to_id = imp.node_id
+        JOIN code_nodes fn ON fn.id = e.from_id AND fn.tombstoned = 0
+        WHERE imp.depth < ?
+          AND e.dismissed = 0
+          AND imp.chain NOT LIKE '%' || fn.name || '%'
+      )
+      SELECT DISTINCT n.id, n.name, n.kind, n.file, n.line_start, n.line_end, imp.depth, imp.chain
+      FROM impact imp
+      JOIN code_nodes n ON n.id = imp.node_id
+      WHERE imp.depth > 0
+      ORDER BY imp.depth ASC, n.name ASC
+      LIMIT 50;
+    `).all(target.id, target.name, Math.min(Math.max(1, maxDepth), 5));
+
+    return {
+      target: this.toDto(target),
+      dependents_count: rows.length,
+      dependents: rows
+    };
+  }
+
+  findShortestPath(fromSymbol, toSymbol, maxDepth = 6) {
+    const fromNode = this.findSymbolByName(fromSymbol);
+    const toNode = this.findSymbolByName(toSymbol);
+    if (!fromNode || !toNode) {
+      return {
+        found: false,
+        reason: !fromNode ? `Symbol not found: ${fromSymbol}` : `Symbol not found: ${toSymbol}`
+      };
+    }
+    if (fromNode.id === toNode.id) {
+      return { found: true, depth: 0, path: [fromNode.name], path_string: fromNode.name };
+    }
+
+    const row = this.db.prepare(`
+      WITH RECURSIVE search_path(curr_id, depth, path_str) AS (
+        SELECT ? AS curr_id, 0 AS depth, CAST(? AS TEXT) AS path_str
+        UNION ALL
+        SELECT e.to_id, sp.depth + 1, sp.path_str || ' -> ' || tn.name
+        FROM code_edges e
+        JOIN search_path sp ON e.from_id = sp.curr_id
+        JOIN code_nodes tn ON tn.id = e.to_id AND tn.tombstoned = 0
+        WHERE sp.depth < ?
+          AND e.dismissed = 0
+          AND sp.path_str NOT LIKE '%' || tn.name || '%'
+      )
+      SELECT path_str, depth
+      FROM search_path
+      WHERE curr_id = ?
+      ORDER BY depth ASC
+      LIMIT 1;
+    `).get(fromNode.id, fromNode.name, Math.min(Math.max(1, maxDepth), 8), toNode.id);
+
+    if (!row) {
+      return { found: false, reason: `No path found between ${fromSymbol} and ${toSymbol} within depth ${maxDepth}` };
+    }
+
+    return {
+      found: true,
+      depth: row.depth,
+      path: row.path_str.split(" -> "),
+      path_string: row.path_str
+    };
+  }
+
+  directionalEdges(targetId, maxEdges = 20) {
+    const calls = this.db.prepare(`
+      SELECT e.id, e.type, tn.name AS target_name, tn.file AS target_file, tn.line_start
+      FROM code_edges e
+      JOIN code_nodes tn ON tn.id = e.to_id AND tn.tombstoned = 0
+      WHERE e.from_id = ? AND e.dismissed = 0
+      ORDER BY e.type, tn.name
+      LIMIT ?
+    `).all(targetId, maxEdges);
+
+    const calledBy = this.db.prepare(`
+      SELECT e.id, e.type, fn.name AS source_name, fn.file AS source_file, fn.line_start
+      FROM code_edges e
+      JOIN code_nodes fn ON fn.id = e.from_id AND fn.tombstoned = 0
+      WHERE e.to_id = ? AND e.dismissed = 0
+      ORDER BY e.type, fn.name
+      LIMIT ?
+    `).all(targetId, maxEdges);
+
+    return { calls, called_by: calledBy };
+  }
+
   findNode(symbol, file, line) {
     const nf = normalizeWorkspaceFile(this.workspaceRoot, file);
     const exact = this.db.prepare(`
@@ -209,14 +407,7 @@ export class GraphRepository {
       ORDER BY ABS(n.line_start - ?) ASC LIMIT 1
     `).get(nf, symbol, line);
     if (byName) return byName;
-    return this.db.prepare(`
-      SELECT n.*, mc.description AS my_cached_explanation, mc.verified_commit, sl.reason AS stale_reason
-      FROM code_nodes n
-      LEFT JOIN mind_concepts mc ON mc.node_id = n.id
-      LEFT JOIN staleness_log sl ON sl.node_id = n.id AND sl.re_verified_at IS NULL
-      WHERE n.tombstoned = 0 AND n.name = ?
-      ORDER BY (n.line_end - n.line_start) ASC LIMIT 1
-    `).get(symbol) ?? null;
+    return this.findSymbolByName(symbol, file);
   }
 
   findContaining(file, line) {

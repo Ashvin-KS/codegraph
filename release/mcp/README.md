@@ -1,123 +1,267 @@
-# CodeGraph — standalone local MCP server
+# CodeGraph
 
-> Local-first codebase graph for Claude Desktop / Claude Code. No VS Code required.
-> Formerly DuckGraph — `duckgraph_*` tool names still work as aliases.
+> Local-first codebase graph, bounded AST explanations, and grounded cognitive memory.
+> Formerly DuckGraph — all `duckgraph.*` commands, settings, storage, env vars, and MCP tools still work as aliases.
 
 Maintained by **Ashvin K S**.
 
-## What this folder is
+CodeGraph is a VS Code coding environment built on Kilo Code and OpenCode that adds local-first structural code intelligence, interactive hovers, and a persistent graph cache.
 
-`build-production/` is **independent of everything else in the repo**:
+It explains symbols from your codebase using a local graph, optional local LLM completions, and a Git-aware staleness tracker. Everything runs offline — no cloud services and no telemetry.
 
-- No `../../kilocode/...` imports, no VS Code APIs, no daemon, no lockfiles.
-- Only runtime deps: `@modelcontextprotocol/sdk` + `better-sqlite3`.
-- Copy this folder alone to any machine and it runs.
+---
 
-```
-build-production/
-  package.json
-  README.md            (this file)
-  bin/codegraph-mcp.js (stdio MCP server — the entrypoint)
-  src/                 (hash, fs, protocol, parser, schema, db, repository)
-  examples/            (Claude Desktop / generic MCP configs)
-```
+## What lives where (independent vs intertwined)
 
-## Quick start (ship to friends)
+| Path | Ships how | Depends on |
+|---|---|---|
+| `build-production/` | Copy this folder alone to friends / Claude Desktop | Nothing else in the repo. Only `better-sqlite3` + MCP SDK. No VS Code, no daemon, no `kilocode/`. |
+| `*.vsix` (extension) | `npm run package` → `kilocode-x.codegraph-0.2.0.vsix` | At *build time* needs `kilocode/` (thin `src/server/*` re-exports bundle it via esbuild). The `.vsix` itself is self-contained. |
+| `src/` | Standalone extension source | `../../kilocode/packages/duckgraph` at build time (documented SSOT). Runtime is bundled. |
+| `kilocode/` | Nested Kilo Code checkout (separate `.git`) | Upstream monorepo; canonical engine lives at `kilocode/packages/duckgraph/src`. |
+| `mcp/duckgraph-mcp/` | Daemon-backed MCP wrapper (needs the extension running) | Running daemon + lockfile. Prefer `build-production/` for Claude Desktop. |
 
+---
+
+## Installation
+
+### 1. VS Code Extension
+
+#### From GitHub Releases (Recommended)
+Download [`codegraph-0.2.0.vsix`](https://github.com/Ashvin-KS/codegraph/releases/tag/v0.2.0) from the [v0.2.0 Release](https://github.com/Ashvin-KS/codegraph/releases/tag/v0.2.0).
+
+Install via CLI:
 ```powershell
-npm install -g ./build-production
-codegraph-setup --workspace C:/path/to/your-project
-# restart Claude Desktop — done, no hand-editing
+code --install-extension codegraph-0.2.0.vsix
 ```
+Or via VS Code UI:
+1. Open VS Code → Extensions (`Ctrl+Shift+X`).
+2. Click **`...`** (Views and More Actions) in the top-right corner.
+3. Select **Install from VSIX...** and pick `codegraph-0.2.0.vsix`.
 
-`codegraph-setup` writes the entry into `claude_desktop_config.json` for you
-(uses the short global `codegraph-mcp` command when it's on PATH, otherwise
-falls back to `node` + the absolute server path). Flags:
-`--workspace <path>` (default: current dir), `--name <server-name>`,
-`--uninstall`, `--config-path <file>`.
-
-Manual alternative — global install, then this entry:
-
-```json
-{
-  "mcpServers": {
-    "codegraph": {
-      "command": "codegraph-mcp",
-      "args": ["--workspace", "C:/path/to/your-project"]
-    }
-  }
-}
-```
-
-## Claude Desktop config
-
-`codegraph-setup` handles this (see above). The entry it writes looks like
-`examples/claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "codegraph": {
-      "command": "codegraph-mcp",
-      "args": ["--workspace", "C:/path/to/your-project"]
-    }
-  }
-}
-```
-
-Env alternatives (no `--workspace` needed if Claude launches from the project root):
-
-- `CODEGRAPH_WORKSPACE=C:/path/to/your-project` (legacy `DUCKGRAPH_WORKSPACE` also works)
-- `CODEGRAPH_DB=C:/custom/graph.db` (default `<workspace>/.codegraph/graph.db`; legacy `.duckgraph/graph.db` is auto-migrated by copy)
-
-## Workflow for the AI (important)
-
-1. `codegraph_health` — check `indexedNodes`. If 0, index first.
-2. `codegraph_index_workspace` — call when `stale_state` is `UNINDEXED`, edges are empty, or after a branch switch. `force_reindex=true` rebuilds (stable ids preserved for unchanged symbols).
-3. `codegraph_query_subgraph` — architecture facts (`verified_edges[].id/type/target_name`). Use these for ALL structural claims.
-4. `codegraph_read_source_node` — implementation detail only.
-5. `codegraph_explain_symbol` — facts + `summary` + `usage_guidance` in one call.
-6. `codegraph_confirm_edge` / `codegraph_dismiss_edge` — curate edges with ids from step 3/5.
-
-Freshness: `FRESH` trusted · `NEW` never explained · `STALE` hedge + prefer source · `UNINDEXED` must index.
-
-## Stability guarantees (fixed bugs)
-
-- **Stable ids**: keys are `file + kind + name` (never line numbers). Editing above a symbol updates lines silently without a new tree, without touching `updated_at`, without spurious `STALE`.
-- **No wipe on empty parse**: files the parser can't handle keep their old graph rows instead of tombstoning everything.
-- **Branch-safe**: out-of-range lines are clamped (not 400); legacy `.duckgraph/graph.db` is migrated to `.codegraph/graph.db` on first run.
-- **Path-safe**: files outside the workspace are rejected; Windows/Unix separators normalized.
-
-## Tools
-
-| Tool | Returns |
-|---|---|
-| `codegraph_index_workspace` | `{workspace_root, indexed_files, nodes, edges, truncated}` |
-| `codegraph_query_subgraph` | `{target, nodes, edges, freshness}` |
-| `codegraph_read_source_node` | `{target_symbol, bounded_source_excerpt, stale_state}` |
-| `codegraph_explain_symbol` | `{target_symbol, verified_edges, inferred_edges, stale_state, bounded_source_excerpt, summary, usage_guidance, compact_json}` |
-| `codegraph_confirm_edge` / `codegraph_dismiss_edge` | `{ok, result}` |
-| `codegraph_health` | `{ok, workspace_root, indexedFiles, indexedNodes, dbPath}` |
-
-Legacy `duckgraph_*` aliases for the first six tools are also listed.
-
-## VS Code extension (separate artifact)
-
-The extension ships separately as a `.vsix`:
-
+#### Or Build from Source
 ```powershell
-# from the repo root (needs the kilocode/ checkout at build time; the .vsix itself is self-contained)
 npm install
 npm run build
 npm run package
+code --install-extension codegraph-0.2.0.vsix
 ```
 
-That produces `kilocode-x.codegraph-0.2.0.vsix`. Install with
-`code --install-extension kilocode-x.codegraph-0.2.0.vsix`.
-Extension commands `codegraph.*` are primary; `duckgraph.*` remain as aliases, as do `codegraph.*` / `duckgraph.*` settings and `.codegraph/` / `.duckgraph/` storage.
+---
+
+### 2. Standalone MCP Server (Claude Desktop & Claude Code)
+
+The `build-production/` folder is **100% independent** (requires only Node.js 20+ and SQLite). No VS Code or monorepo needed.
+
+#### Option A: One-Command Setup for Claude Desktop
+```powershell
+cd build-production
+npm install
+node ./bin/codegraph-setup.js --workspace C:/path/to/your-project
+```
+*Restart Claude Desktop — done!*
+
+To remove the entry later:
+```powershell
+node ./bin/codegraph-setup.js --workspace . --uninstall
+```
+
+#### Option B: Manual Config for Claude Desktop
+Add to your `claude_desktop_config.json` (`%APPDATA%\Claude\` on Windows, `~/Library/Application Support/Claude/` on macOS):
+
+```json
+{
+  "mcpServers": {
+    "codegraph": {
+      "command": "node",
+      "args": [
+        "C:/path/to/codegraph/build-production/bin/codegraph-mcp.js",
+        "--workspace",
+        "C:/path/to/your-project"
+      ]
+    }
+  }
+}
+```
+
+#### Option C: Claude Code CLI
+Add directly to Claude Code (automatically uses the project you run Claude Code in, or pass `--workspace`):
+```powershell
+claude mcp add codegraph -- node C:/path/to/codegraph/build-production/bin/codegraph-mcp.js
+```
+Or after installing globally (`npm install -g ./build-production`):
+```powershell
+claude mcp add codegraph -- codegraph-mcp
+```
+
+---
+
+### 3. One-Command Automated Installer (`release/`)
+
+From the `release/` folder or downloaded release bundle:
+
+**Windows PowerShell:**
+```powershell
+.\install.ps1 -Workspace C:\path\to\your-project
+```
+
+**macOS / Linux:**
+```bash
+./install.sh --workspace /path/to/your-project
+```
+This installs the global MCP server, configures Claude Desktop, and installs the `.vsix` in one step.
+Pass `-SkipMcp` or `-SkipExtension` to install only one.
+
+---
+
+### 4. Developer / Build Verification
+
+```powershell
+npm run lint              # ESLint check
+npm run typecheck         # TypeScript check
+npm test                  # Vitest regression test suite
+npm run build:production  # Standalone MCP stdio smoke test
+npm run release           # Assembles release/ distribution bundle
+```
+
+---
+
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph IDE ["VS Code (CodeGraph / Kilo-vscode)"]
+        UI["SolidJS Settings Webview Tab"]
+        A["Alt+Hover / Alt+D Command"]
+        E["LSP Reference Provider"]
+        W["watchDuckGraphConfig (IPC)"]
+    end
+
+    subgraph Daemon ["Local CodeGraph Daemon (Node + Express + WASM)"]
+        F["POST /explain (Lockfile Auth)"]
+        G["Cache Match (mind_concepts)"]
+        H["Recursive CTE Subgraph Query"]
+        I["Hybrid Router (Source vs Graph)"]
+        J["web-tree-sitter AST Body Extraction"]
+        K["Prompt Assembly & Token Squeeze"]
+    end
+
+    subgraph DB ["SQLite WAL Database (.codegraph/graph.db, migrates .duckgraph/graph.db)"]
+        N["code_nodes / code_edges"]
+        O["mind_concepts (User memory)"]
+        P["git_rationale & staleness_log"]
+    end
+
+    subgraph Providers ["Inference / Tooling"]
+        L["Local llama.cpp / LM Studio"]
+        MCP["Standalone Stdio MCP Server (build-production/)"]
+    end
+
+    UI -->|IPC Settings Sync| W
+    W -->|Update State| F
+    A -->|ALT+Hover Request| F
+    E -->|LSP references| N
+    F --> G
+    G -->|Cache Hit| A
+    G -->|Cache Miss| H
+    H --> DB
+    H --> I
+    I -->|Needs Source| J
+    J --> K
+    K --> L
+    L -->|Ground Explanation| O
+    O --> A
+    MCP -->|Tools API| F
+```
+
+---
+
+## Key fixes in 0.2.0
+
+- **Stable re-index**: node keys are `file + kind + name` (never line numbers). Line shifts update silently without a new tree, without touching `updated_at`, without spurious `STALE`. Duplicate symbols get deterministic `#2` suffixes. Empty parses no longer wipe the graph. `orbit` ordering is stable (`file, name`).
+- **Branch-safe**: git watcher resolves worktree `.git` files, diffs `HEAD@{1}..HEAD` with merge-aware fallback, and stale line numbers are clamped instead of `400`. Files escaping the workspace are rejected.
+- **MCP that works**: lockfile discovery checks `--workspace` / `CODEGRAPH_WORKSPACE`, workspace `.codegraph/` + `.duckgraph/`, and all publisher `globalStorage` roots; 30s timeouts with actionable errors; `integer` schemas with descriptions; `codegraph_health` tool; `explain` returns `summary` + `usage_guidance` so Claude needs no llama.cpp.
+- **Rename without breakage**: extension id `kilocode-x.codegraph`, commands/settings/storage/env/MCP tools all dual-named (`codegraph.*` primary, `duckgraph.*` alias). DB auto-migrates `.duckgraph/graph.db` → `.codegraph/graph.db` by copy.
+
+---
+
+## Repository layout
+
+- `src/` — standalone extension source, now **vendored and self-contained** (was thin re-exports; vendored in 0.2.0 so the extension builds, lints, and tests with no `kilocode/` checkout). Canonical upstream mirror lives at `kilocode/packages/duckgraph/src` (nested repo, kept in sync).
+- `kilocode/` — nested Kilo Code checkout (separate git repo).
+  - `packages/duckgraph/` — upstream mirror of the engine (WASM parsers, Express daemon, database).
+  - `packages/kilo-vscode/` — VS Code extension, settings tab, config watchers.
+  - `packages/opencode/` — agent prompt mappings and tool registrations.
+- `mcp/duckgraph-mcp/` — daemon-backed stdio MCP wrapper (needs the extension running).
+- `build-production/` — **independent** standalone MCP server (no daemon, no VS Code, no `kilocode/`).
+
+---
+
+## Configuration
+
+New `codegraph.*` settings (legacy `duckgraph.*` still read as fallback):
+
+| Property | Default | Description |
+|---|---|---|
+| `codegraph.llamaUrl` | `"http://localhost:8080/completion"` | Local llama.cpp endpoint for hover completions. |
+| `codegraph.userLevel` | `"intermediate"` | Explanation depth (`beginner`, `intermediate`, `expert`). |
+| `codegraph.enabledLanguages` | `["rust","typescript","typescriptreact","python"]` | Indexer filter (all 21 parser languages supported when enabled). |
+| `codegraph.hoverMode` | `"always"` | `always` or `commandOnly`. |
+| `codegraph.indexOnStartup` | `true` | Index on activation. |
+| `codegraph.maxEdges` | `15` | Circuit breaker for highly referenced nodes. |
+| `codegraph.debugGraphJson` | `false` | Append graph JSON to hovers. |
+
+Env: `CODEGRAPH_WORKSPACE`, `CODEGRAPH_LOCKFILE`, `CODEGRAPH_DB`, `CODEGRAPH_GLOBAL_STORAGE`, `CODEGRAPH_NODE_PATH` (each with `DUCKGRAPH_*` fallback). Auth headers: `X-CodeGraph-Auth` (server also accepts `X-DuckGraph-Auth`).
+
+---
+
+## Agent Playbook: Recommended Tool Execution Order
+
+When exploring an unfamiliar codebase, AI agents should follow this step-by-step workflow:
+
+### Step 1: Orientation & Architecture Discovery (Start Here)
+- **`codegraph_overview`**: Call this FIRST. Returns detected entrypoints (`main`, `activate`, `createApp`), degree-centrality hub symbols with the most callers/callees, languages, and index stats.
+
+### Step 2: Search & Symbol Discovery
+- **`codegraph_search_symbols`**: Fast substring search across the workspace. Returns symbol names, kinds (`function`, `class`, `interface`), files, and line numbers. Use when locating a function without knowing its file path.
+
+### Step 3: Deep Symbol Inspection
+- **`codegraph_explain_symbol`**: Deep inspection of any symbol. Returns verified call relationships, callers, AST-bounded source excerpt, and grounded summary. Can be queried by symbol name alone (searches workspace automatically) or file+line.
+  - Supports `format: "compact"` (token-saving default), `format: "mermaid"` (diagram), or `format: "json"`.
+- **`codegraph_query_subgraph`**: Relationship subgraph showing callers, callees, and type dependencies.
+- **`codegraph_read_source_node`**: Extract AST-bounded code window for a symbol.
+
+### Step 4: Architectural Tracing & Call Paths
+- **`codegraph_find_path`**: Find the shortest call-chain between two symbols (`from_symbol` -> `to_symbol`). Traces how execution flows from entrypoints down to utilities.
+
+### Step 5: Pre-Edit Safety & Impact Analysis
+- **`codegraph_impact_analysis`**: Blast radius analysis. Traces all direct and indirect downstream callers/dependents up to $N$ hops away. Run this BEFORE editing or refactoring a symbol to know what might break.
+
+### Step 6: Maintenance & Incremental Updates
+- **`codegraph_index_workspace`**: Re-index the codebase. Set `dirty_only: true` after editing files to re-index only git-modified files in milliseconds.
+- **`codegraph_health`**: Check database connection and index stats.
+
+---
+
+## MCP Tools Reference
+
+Primary tools (`codegraph_*`; legacy `duckgraph_*` aliases supported):
+
+1. **`codegraph_overview`** — High-level architectural map with entrypoints, centrality hubs, and language distribution.
+2. **`codegraph_search_symbols`** — Substring search across all indexed symbols with kinds, files, and lines.
+3. **`codegraph_explain_symbol`** — Grounded symbol explanation with callers/callees and bounded source excerpt (`compact`, `mermaid`, or `json`).
+4. **`codegraph_query_subgraph`** — Bounded relationship graph for a symbol.
+5. **`codegraph_impact_analysis`** — Blast radius analysis showing all downstream dependents/callers up to $N$ hops away.
+6. **`codegraph_find_path`** — Shortest call chain between two symbols.
+7. **`codegraph_read_source_node`** — AST-bounded source excerpt for a symbol.
+8. **`codegraph_index_workspace`** — Index or re-index the workspace (`dirty_only: true` for fast incremental git updates).
+9. **`codegraph_health`** — Index stats, db path, and health status.
+10. **`codegraph_confirm_edge`** — Confirm an inferred edge.
+11. **`codegraph_dismiss_edge`** — Reject an inferred edge.
+
+---
 
 ## Credits
 
 - Author/maintainer: **Ashvin K S**
-- Built on: Model Context Protocol SDK, SQLite (`better-sqlite3`), tree-sitter patterns (regex fallback vendored here)
-- Sibling projects: Kilo Code, OpenCode, VS Code Extension API, D3 (orbit view in the extension only)
+- Built on Kilo Code and OpenCode. Uses the VS Code Extension API, the Model Context Protocol SDK, tree-sitter, web-tree-sitter, tree-sitter-wasms, SQLite (`better-sqlite3`), Express, and D3.

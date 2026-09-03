@@ -111,8 +111,12 @@ async function smoke() {
     const tools = await send(2, "tools/list", {});
     const names = (tools.result?.tools ?? []).map((t) => t.name);
     for (const expected of [
+      "codegraph_overview",
+      "codegraph_search_symbols",
       "codegraph_index_workspace",
       "codegraph_query_subgraph",
+      "codegraph_impact_analysis",
+      "codegraph_find_path",
       "codegraph_read_source_node",
       "codegraph_explain_symbol",
       "codegraph_confirm_edge",
@@ -140,15 +144,35 @@ async function smoke() {
     if (!legacyText.includes("indexed_files")) fail(`duckgraph alias call unexpected: ${legacyText.slice(0, 200)}`);
     else ok("duckgraph_* backward compatibility call");
 
-    const explained = await send(5, "tools/call", {
+    const overview = await send(5, "tools/call", { name: "codegraph_overview", arguments: {} });
+    const ovText = overview.result?.content?.[0]?.text ?? "";
+    if (!ovText.includes("Overview") && !ovText.includes("stats")) fail(`overview unexpected: ${ovText}`);
+    else ok("overview");
+
+    const search = await send(6, "tools/call", { name: "codegraph_search_symbols", arguments: { query: "total" } });
+    const searchText = search.result?.content?.[0]?.text ?? "";
+    if (!searchText.includes("total")) fail(`search_symbols missing total: ${searchText}`);
+    else ok("search_symbols");
+
+    const explained = await send(7, "tools/call", {
       name: "codegraph_explain_symbol",
-      arguments: { symbol: "total", file: "sample.ts", line: 2 }
+      arguments: { symbol: "total", format: "compact" }
     });
     const explainedText = explained.result?.content?.[0]?.text ?? "";
     if (!explainedText.includes("total")) fail(`explain_symbol missing symbol: ${explainedText.slice(0, 200)}`);
-    else ok("explain_symbol");
+    else ok("explain_symbol (decoupled from file/line)");
 
-    const health = await send(6, "tools/call", { name: "codegraph_health", arguments: {} });
+    const impact = await send(8, "tools/call", { name: "codegraph_impact_analysis", arguments: { symbol: "add" } });
+    const impactText = impact.result?.content?.[0]?.text ?? "";
+    if (!impactText.includes("add")) fail(`impact_analysis unexpected: ${impactText}`);
+    else ok("impact_analysis");
+
+    const pathRes = await send(9, "tools/call", { name: "codegraph_find_path", arguments: { from_symbol: "total", to_symbol: "add" } });
+    const pathText = pathRes.result?.content?.[0]?.text ?? "";
+    if (!pathText.includes("total -> add") && !pathText.includes("add")) fail(`find_path unexpected: ${pathText}`);
+    else ok("find_path");
+
+    const health = await send(10, "tools/call", { name: "codegraph_health", arguments: {} });
     const healthText = health.result?.content?.[0]?.text ?? "";
     if (!healthText.includes("indexedNodes")) fail(`health unexpected: ${healthText.slice(0, 200)}`);
     else ok("health");
