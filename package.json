@@ -6,6 +6,12 @@
   "publisher": "kilocode-x",
   "license": "MIT",
   "private": false,
+  "bin": {
+    "codegraph": "./build-production/bin/codegraph-mcp.js",
+    "codegraph-mcp": "./build-production/bin/codegraph-mcp.js",
+    "duckgraph-mcp": "./build-production/bin/codegraph-mcp.js",
+    "codegraph-setup": "./build-production/bin/codegraph-setup.js"
+  },
   "engines": {
     "vscode": "^1.120.0"
   },
@@ -258,6 +264,7 @@
     "package": "npm run build && vsce package --allow-missing-repository --no-dependencies"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "better-sqlite3": "^12.10.0",
     "chokidar": "^4.0.3",
     "d3": "^7.9.0",

@@ -85,8 +85,13 @@ Add to your `claude_desktop_config.json` (`%APPDATA%\Claude\` on Windows, `~/Lib
 ```
 
 #### Option C: Claude Code CLI
+Add directly to Claude Code (automatically uses the project you run Claude Code in, or pass `--workspace`):
 ```powershell
-claude mcp add codegraph node C:/path/to/codegraph/build-production/bin/codegraph-mcp.js --workspace C:/path/to/your-project
+claude mcp add codegraph -- node C:/path/to/codegraph/build-production/bin/codegraph-mcp.js
+```
+Or after installing globally (`npm install -g ./build-production`):
+```powershell
+claude mcp add codegraph -- codegraph-mcp
 ```
 
 ---

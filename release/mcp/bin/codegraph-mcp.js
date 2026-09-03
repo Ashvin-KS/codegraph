@@ -232,11 +232,9 @@ const primaryTools = [
   }
 ];
 
-const legacyTools = primaryTools
-  .filter((t) => t.name.startsWith("codegraph_") && t.name !== "codegraph_health")
-  .map((t) => ({ ...t, name: t.name.replace(/^codegraph_/, "duckgraph_"), description: `${t.description} (Legacy alias; prefer ${t.name}.)` }));
-
-const tools = [...primaryTools, ...legacyTools];
+// Legacy aliases (duckgraph_*) are supported silently in CallTool for backward compatibility,
+// but NOT advertised in tools/list to avoid cluttering tool pickers and duplicate tool confusion.
+const tools = primaryTools;
 
 const server = new Server({ name: "codegraph", version: "0.2.0" }, { capabilities: { tools: {} } });
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));

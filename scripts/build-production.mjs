@@ -110,11 +110,19 @@ async function smoke() {
 
     const tools = await send(2, "tools/list", {});
     const names = (tools.result?.tools ?? []).map((t) => t.name);
-    for (const expected of ["codegraph_index_workspace", "codegraph_query_subgraph", "codegraph_explain_symbol", "codegraph_health"]) {
+    for (const expected of [
+      "codegraph_index_workspace",
+      "codegraph_query_subgraph",
+      "codegraph_read_source_node",
+      "codegraph_explain_symbol",
+      "codegraph_confirm_edge",
+      "codegraph_dismiss_edge",
+      "codegraph_health"
+    ]) {
       if (!names.includes(expected)) fail(`missing tool ${expected}`);
     }
-    if (!names.includes("duckgraph_index_workspace")) fail("missing legacy duckgraph alias");
-    else ok(`tools/list (${names.length} tools)`);
+    if (names.some((n) => n.startsWith("duckgraph_"))) fail("duckgraph_* duplicate tools should not be advertised in tools/list");
+    else ok(`tools/list clean (${names.length} primary tools, 0 duplicates)`);
 
     const indexed = await send(3, "tools/call", {
       name: "codegraph_index_workspace",
@@ -124,7 +132,15 @@ async function smoke() {
     if (!indexedText.includes("indexed_files")) fail(`index_workspace unexpected: ${indexedText.slice(0, 200)}`);
     else ok("index_workspace");
 
-    const explained = await send(4, "tools/call", {
+    const legacyIndexed = await send(4, "tools/call", {
+      name: "duckgraph_index_workspace",
+      arguments: { max_files: 10 }
+    });
+    const legacyText = legacyIndexed.result?.content?.[0]?.text ?? "";
+    if (!legacyText.includes("indexed_files")) fail(`duckgraph alias call unexpected: ${legacyText.slice(0, 200)}`);
+    else ok("duckgraph_* backward compatibility call");
+
+    const explained = await send(5, "tools/call", {
       name: "codegraph_explain_symbol",
       arguments: { symbol: "total", file: "sample.ts", line: 2 }
     });
@@ -132,7 +148,7 @@ async function smoke() {
     if (!explainedText.includes("total")) fail(`explain_symbol missing symbol: ${explainedText.slice(0, 200)}`);
     else ok("explain_symbol");
 
-    const health = await send(5, "tools/call", { name: "codegraph_health", arguments: {} });
+    const health = await send(6, "tools/call", { name: "codegraph_health", arguments: {} });
     const healthText = health.result?.content?.[0]?.text ?? "";
     if (!healthText.includes("indexedNodes")) fail(`health unexpected: ${healthText.slice(0, 200)}`);
     else ok("health");
