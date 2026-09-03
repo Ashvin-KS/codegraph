@@ -33,7 +33,7 @@ const builds = [
 if (watch) {
   const contexts = await Promise.all(builds.map((options) => context(options)));
   await Promise.all(contexts.map((ctx) => ctx.watch()));
-  console.log("DuckGraph build watcher is running.");
+  console.log("CodeGraph build watcher is running.");
 } else {
   await Promise.all(builds.map((options) => build(options)));
 }

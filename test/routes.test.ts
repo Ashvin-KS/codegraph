@@ -70,6 +70,7 @@ describe("server routes", () => {
       .expect(200);
     expect(explain.body.explanation).toContain("add");
 
+    // Stale line numbers (e.g. after a branch switch) are clamped, not rejected.
     await request(app)
       .post("/explain")
       .set(AUTH_HEADER, "secret")
@@ -77,6 +78,53 @@ describe("server routes", () => {
         symbol: "add",
         file: "sample.ts",
         line: 999,
+        depth: 1,
+        user_level: "intermediate",
+        workspace_root: root,
+        llama_url: "http://127.0.0.1:9/completion"
+      })
+      .expect(200);
+
+    // Legitimate relative paths in subdirectories work properly.
+    fs.mkdirSync(path.join(root, "nested"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, "nested", "sub.ts"),
+      "export function sub(a: number, b: number): number { return a - b; }\n",
+      "utf8"
+    );
+    await request(app)
+      .post("/index")
+      .set(AUTH_HEADER, "secret")
+      .send({
+        file: "nested/sub.ts",
+        content: "export function sub(a: number, b: number): number { return a - b; }\n",
+        workspace_root: root
+      })
+      .expect(200);
+
+    const explainNested = await request(app)
+      .post("/explain")
+      .set(AUTH_HEADER, "secret")
+      .send({
+        symbol: "sub",
+        file: "nested/sub.ts",
+        line: 1,
+        depth: 1,
+        user_level: "intermediate",
+        workspace_root: root,
+        llama_url: "http://127.0.0.1:9/completion"
+      })
+      .expect(200);
+    expect(explainNested.body.explanation).toContain("sub");
+
+    // Path traversal outside the workspace is rejected.
+    await request(app)
+      .post("/explain")
+      .set(AUTH_HEADER, "secret")
+      .send({
+        symbol: "add",
+        file: "../outside.ts",
+        line: 1,
         depth: 1,
         user_level: "intermediate",
         workspace_root: root,

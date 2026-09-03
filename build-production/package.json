@@ -1,0 +1,35 @@
+{
+  "name": "@kilocode-x/codegraph-mcp",
+  "version": "0.2.0",
+  "description": "CodeGraph standalone local MCP server — structural code intelligence for Claude Desktop / Claude Code. No VS Code required. (DuckGraph successor; duckgraph_* aliases included.)",
+  "type": "module",
+  "bin": {
+    "codegraph-mcp": "./bin/codegraph-mcp.js",
+    "duckgraph-mcp": "./bin/codegraph-mcp.js",
+    "codegraph-setup": "./bin/codegraph-setup.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "examples",
+    "README.md"
+  ],
+  "keywords": [
+    "mcp",
+    "codegraph",
+    "claude",
+    "code-intelligence",
+    "local-first"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-sqlite3": "^12.10.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node ./bin/codegraph-mcp.js --workspace ."
+  }
+}

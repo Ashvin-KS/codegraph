@@ -17,11 +17,15 @@ for (const wasmName of ["tree-sitter.wasm", "web-tree-sitter.wasm"]) {
   }
 }
 
-for (const name of ["rust", "typescript", "tsx", "python"]) {
-  copyFileSync(
-    require.resolve(`tree-sitter-wasms/out/tree-sitter-${name}.wasm`),
-    new URL(`tree-sitter-${name}.wasm`, distWasm)
-  );
+for (const name of ["rust", "typescript", "tsx", "python", "go", "c", "cpp", "c_sharp", "java", "ruby", "php", "bash", "html", "css", "json", "kotlin", "lua", "solidity", "swift", "yaml"]) {
+  try {
+    copyFileSync(
+      require.resolve(`tree-sitter-wasms/out/tree-sitter-${name}.wasm`),
+      new URL(`tree-sitter-${name}.wasm`, distWasm)
+    );
+  } catch {
+    console.warn(`CodeGraph: optional wasm tree-sitter-${name}.wasm not found; regex fallback will be used.`);
+  }
 }
 
 const d3Package = packageRoot(require.resolve("d3"));
@@ -34,7 +38,7 @@ copyRuntimePackage("better-sqlite3", ["lib", "build/Release/better_sqlite3.node"
 copyRuntimePackage("bindings", ["bindings.js", "package.json"]);
 copyRuntimePackage("file-uri-to-path", ["index.js", "package.json"]);
 
-console.log(`Copied DuckGraph assets under ${root.pathname}`);
+console.log(`Copied CodeGraph assets under ${root.pathname}`);
 
 function packageRoot(resolvedEntry) {
   let current = dirname(resolvedEntry);

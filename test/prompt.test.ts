@@ -44,15 +44,18 @@ const subgraph: SubgraphResult = {
 };
 
 describe("prompt assembly", () => {
-  it("strips nulls and empty values", () => {
-    expect(stripEmpty({ a: null, b: [], c: { d: "ok" } })).toEqual({ c: { d: "ok" } });
+  it("strips nulls but keeps empty edge signal", () => {
+    expect(stripEmpty({ a: null, b: [], c: { d: "ok" } })).toEqual({ b: [], c: { d: "ok" } });
   });
 
   it("builds minified graph-grounded prompt JSON", () => {
     const prompt = buildPrompt(request, subgraph, null);
-    expect(prompt).toContain("verified subgraph");
     expect(prompt).toContain("total");
-    expect(prompt).not.toContain("null");
+    expect(prompt).toContain("query");
+    expect(prompt).toContain("edge_count");
+    // Empty values are stripped, but the query symbol must survive even
+    // when the target is unindexed.
+    expect(prompt).not.toContain('"symbol":null');
   });
 
   it("creates deterministic fallback text", () => {

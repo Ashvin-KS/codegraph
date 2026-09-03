@@ -11,16 +11,39 @@ export interface DuckConfig {
   debugGraphJson: boolean;
 }
 
+export type CodeGraphConfig = DuckConfig;
+
+function readSection(section: string): DuckConfig | null {
+  try {
+    const config = vscode.workspace.getConfiguration(section);
+    if (!config) return null;
+    const enabled = config.get<string[]>("enabledLanguages", ["rust", "typescript", "typescriptreact", "python"]);
+    return {
+      llamaUrl: config.get<string>("llamaUrl", "http://localhost:8080/completion"),
+      userLevel: config.get<UserLevel>("userLevel", "intermediate"),
+      enabledLanguages: (enabled ?? []).filter(isSupportedLanguageId),
+      hoverMode: config.get<HoverMode>("hoverMode", "always"),
+      indexOnStartup: config.get<boolean>("indexOnStartup", true),
+      maxEdges: config.get<number>("maxEdges", 15),
+      debugGraphJson: config.get<boolean>("debugGraphJson", false)
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function readDuckConfig(): DuckConfig {
-  const config = vscode.workspace.getConfiguration("duckgraph");
-  const enabled = config.get<string[]>("enabledLanguages", ["rust", "typescript", "typescriptreact", "python"]);
-  return {
-    llamaUrl: config.get<string>("llamaUrl", "http://localhost:8080/completion"),
-    userLevel: config.get<UserLevel>("userLevel", "intermediate"),
-    enabledLanguages: enabled.filter(isSupportedLanguageId),
-    hoverMode: config.get<HoverMode>("hoverMode", "always"),
-    indexOnStartup: config.get<boolean>("indexOnStartup", true),
-    maxEdges: config.get<number>("maxEdges", 15),
-    debugGraphJson: config.get<boolean>("debugGraphJson", false)
+  // New namespace first, legacy duckgraph.* as fallback so the rename
+  // doesn't silently reset existing user settings.
+  return readSection("codegraph") ?? readSection("duckgraph") ?? {
+    llamaUrl: "http://localhost:8080/completion",
+    userLevel: "intermediate",
+    enabledLanguages: ["rust", "typescript", "typescriptreact", "python"],
+    hoverMode: "always",
+    indexOnStartup: true,
+    maxEdges: 15,
+    debugGraphJson: false
   };
 }
+
+export { readDuckConfig as readCodeGraphConfig };

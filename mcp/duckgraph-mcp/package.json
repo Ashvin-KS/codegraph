@@ -1,9 +1,10 @@
 {
-  "name": "@kairos-ai/duckgraph-mcp",
-  "version": "0.1.0",
-  "description": "Standalone MCP server for DuckGraph structural code intelligence.",
+  "name": "@kilocode-x/codegraph-mcp",
+  "version": "0.2.0",
+  "description": "Standalone MCP server for CodeGraph structural code intelligence. (Formerly DuckGraph; duckgraph_* tools still work.)",
   "type": "module",
   "bin": {
+    "codegraph-mcp": "./bin/duckgraph-mcp.js",
     "duckgraph-mcp": "./bin/duckgraph-mcp.js"
   },
   "files": [
@@ -12,8 +13,8 @@
   ],
   "keywords": [
     "mcp",
+    "codegraph",
     "duckgraph",
-    "kairos",
     "code-intelligence",
     "tree-sitter",
     "graph"

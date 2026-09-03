@@ -1,31 +1,73 @@
+import * as crypto from "node:crypto";
 import * as vscode from "vscode";
 import type { DuckGraphClient } from "./client";
 
+let activePanel: vscode.WebviewPanel | null = null;
+
 export async function showOrbitGraph(context: vscode.ExtensionContext, client: DuckGraphClient): Promise<void> {
-  const graph = await client.orbitGraph();
+  let graph: unknown;
+  try {
+    graph = await client.orbitGraph();
+  } catch (error) {
+    throw new Error(`CodeGraph orbit query failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!isOrbitGraph(graph)) {
+    throw new Error("CodeGraph daemon returned a malformed orbit graph.");
+  }
+  if (activePanel) {
+    try {
+      activePanel.reveal(vscode.ViewColumn.Beside);
+      activePanel.webview.html = html(nonce(), panelD3Uri(context, activePanel), graph);
+      activePanel.title = "CodeGraph Orbit";
+      return;
+    } catch {
+      activePanel = null;
+    }
+  }
   const panel = vscode.window.createWebviewPanel(
-    "duckgraphOrbit",
-    "DuckGraph Orbit",
+    "codegraphOrbit",
+    "CodeGraph Orbit",
     vscode.ViewColumn.Beside,
     {
       enableScripts: true,
-      localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media")]
+      localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media")],
+      retainContextWhenHidden: true
     }
   );
-  const nonce = String(Date.now()) + Math.random().toString(16).slice(2);
-  const d3Uri = panel.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, "media", "d3.min.js"));
-  panel.webview.html = html(nonce, d3Uri, graph);
+  activePanel = panel;
+  panel.onDidDispose(() => {
+    if (activePanel === panel) activePanel = null;
+  });
+  panel.webview.html = html(nonce(), panelD3Uri(context, panel), graph);
 }
 
-function html(nonce: string, d3Uri: vscode.Uri, graph: unknown): string {
+function panelD3Uri(context: vscode.ExtensionContext, panel: vscode.WebviewPanel): vscode.Uri {
+  return panel.webview.asWebviewUri(vscode.Uri.joinPath(context.extensionUri, "media", "d3.min.js"));
+}
+
+function nonce(): string {
+  try {
+    return crypto.randomUUID().replace(/-/g, "");
+  } catch {
+    return String(Date.now()) + Math.random().toString(16).slice(2);
+  }
+}
+
+function isOrbitGraph(value: unknown): value is { nodes: unknown[]; edges: unknown[] } {
+  if (!value || typeof value !== "object") return false;
+  const v = value as { nodes?: unknown; edges?: unknown };
+  return Array.isArray(v.nodes) && Array.isArray(v.edges);
+}
+
+function html(n: string, d3Uri: vscode.Uri, graph: unknown): string {
   const graphJson = JSON.stringify(graph).replace(/</g, "\\u003c");
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
-  <title>DuckGraph Orbit</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'nonce-${n}';">
+  <title>CodeGraph Orbit</title>
   <style>
     html, body, svg { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--vscode-editor-background); color: var(--vscode-editor-foreground); font-family: var(--vscode-font-family); }
     svg { cursor: move; }
@@ -38,9 +80,9 @@ function html(nonce: string, d3Uri: vscode.Uri, graph: unknown): string {
   </style>
 </head>
 <body>
-  <svg role="img" aria-label="DuckGraph Orbit graph"></svg>
-  <script nonce="${nonce}" src="${d3Uri}"></script>
-  <script nonce="${nonce}">
+  <svg role="img" aria-label="CodeGraph Orbit graph"></svg>
+  <script nonce="${n}" src="${d3Uri}"></script>
+  <script nonce="${n}">
     const graph = ${graphJson};
     const svg = d3.select("svg");
     const width = Math.max(document.body.clientWidth, 640);

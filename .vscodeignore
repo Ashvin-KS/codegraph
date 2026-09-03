@@ -1,7 +1,10 @@
 kilocode/**
 .vscode/**
 .vscode-test/**
+.codegraph/**
 .duckgraph/**
+build-production/**
+release/**
 src/**
 test/**
 scripts/**
