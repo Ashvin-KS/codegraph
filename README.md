@@ -23,49 +23,101 @@ It explains symbols from your codebase using a local graph, optional local LLM c
 
 ---
 
-## Quick start
+## Installation
 
-### A. Standalone MCP for Claude Desktop (recommended, no VS Code)
+### 1. VS Code Extension
 
+#### From GitHub Releases (Recommended)
+Download [`codegraph-0.2.0.vsix`](https://github.com/Ashvin-KS/codegraph/releases/tag/v0.2.0) from the [v0.2.0 Release](https://github.com/Ashvin-KS/codegraph/releases/tag/v0.2.0).
+
+Install via CLI:
 ```powershell
-npm install -g ./build-production
-codegraph-setup --workspace C:/path/to/your-project
-# restart Claude Desktop — done
+code --install-extension codegraph-0.2.0.vsix
 ```
+Or via VS Code UI:
+1. Open VS Code → Extensions (`Ctrl+Shift+X`).
+2. Click **`...`** (Views and More Actions) in the top-right corner.
+3. Select **Install from VSIX...** and pick `codegraph-0.2.0.vsix`.
 
-This writes the global `codegraph-mcp` entry into `claude_desktop_config.json`
-for you (see `build-production/examples/claude_desktop_config.json`).
-Then in Claude: `codegraph_health` → `codegraph_index_workspace` → `codegraph_explain_symbol`.
-
-### B. VS Code extension (`kilocode-x.codegraph`)
-
+#### Or Build from Source
 ```powershell
 npm install
 npm run build
-npm run lint
-npm run typecheck
-npm test
 npm run package
-code --install-extension kilocode-x.codegraph-0.2.0.vsix
+code --install-extension codegraph-0.2.0.vsix
 ```
 
-### C. Validate the shippable MCP
+---
+
+### 2. Standalone MCP Server (Claude Desktop & Claude Code)
+
+The `build-production/` folder is **100% independent** (requires only Node.js 20+ and SQLite). No VS Code or monorepo needed.
+
+#### Option A: One-Command Setup for Claude Desktop
+```powershell
+cd build-production
+npm install
+node ./bin/codegraph-setup.js --workspace C:/path/to/your-project
+```
+*Restart Claude Desktop — done!*
+
+To remove the entry later:
+```powershell
+node ./bin/codegraph-setup.js --workspace . --uninstall
+```
+
+#### Option B: Manual Config for Claude Desktop
+Add to your `claude_desktop_config.json` (`%APPDATA%\Claude\` on Windows, `~/Library/Application Support/Claude/` on macOS):
+
+```json
+{
+  "mcpServers": {
+    "codegraph": {
+      "command": "node",
+      "args": [
+        "C:/path/to/codegraph/build-production/bin/codegraph-mcp.js",
+        "--workspace",
+        "C:/path/to/your-project"
+      ]
+    }
+  }
+}
+```
+
+#### Option C: Claude Code CLI
+```powershell
+claude mcp add codegraph node C:/path/to/codegraph/build-production/bin/codegraph-mcp.js --workspace C:/path/to/your-project
+```
+
+---
+
+### 3. One-Command Automated Installer (`release/`)
+
+From the `release/` folder or downloaded release bundle:
+
+**Windows PowerShell:**
+```powershell
+.\install.ps1 -Workspace C:\path\to\your-project
+```
+
+**macOS / Linux:**
+```bash
+./install.sh --workspace /path/to/your-project
+```
+This installs the global MCP server, configures Claude Desktop, and installs the `.vsix` in one step.
+Pass `-SkipMcp` or `-SkipExtension` to install only one.
+
+---
+
+### 4. Developer / Build Verification
 
 ```powershell
-# from the repo root (needs build-production/node_modules for the smoke test)
-cd build-production; npm install; cd ..
-npm run build:production
+npm run lint              # ESLint check
+npm run typecheck         # TypeScript check
+npm test                  # Vitest regression test suite
+npm run build:production  # Standalone MCP stdio smoke test
+npm run release           # Assembles release/ distribution bundle
 ```
-
-### D. GitHub release folder
-
-```powershell
-npm run release   # assembles release/ : installer + mcp/ + vsix + docs, nothing else
-```
-
-`release/` is the minimal post-to-GitHub set: `install.ps1` / `install.sh`,
-`mcp/` (standalone server), `codegraph-*.vsix`, `README.md`, `LICENSE.txt`,
-`CHANGELOG.md`. Regenerate it after any vsix or MCP change.
 
 ---
 
