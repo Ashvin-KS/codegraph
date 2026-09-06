@@ -17,7 +17,10 @@ The code-intelligence landscape for AI coding agents is currently split between 
 ### The Strategic Verdict:
 - **Ashvin's CodeGraph possesses the vastly superior architectural foundation**. Real-world software engineering is relational and graph-based. Raw file dumps like Colby's collapse under long-running agent tasks due to context-window bloat, attention dilution, and "lost in the middle" degradation.
 - **However, Colby currently wins on single-turn ergonomic speed** because an agent can get answers without incurring a 3-turn tool-calling tax.
-- **The Unified Plan**: By introducing a composite **`codegraph_context_slice`** tool (combining Colby's 1-turn speed with Ashvin's lean AST token footprint) and **dynamic workspace discovery**, Ashvin's CodeGraph decisively beats Colby on both speed and depth.
+- **The Unified Solution (v0.3.0)**:
+  1. **100% Pure Tree-Sitter WASM Engine**: Completely delete regex parsing from the standalone MCP in favor of `web-tree-sitter` (pure WASM, zero native C++ build toolchain needed).
+  2. **Composite `codegraph_context_slice` Tool**: Combine Colby's 1-turn speed with Ashvin's lean AST token footprint (~800–1,200 tokens).
+  3. **Dynamic Workspace Auto-Discovery & Multi-Repo Pool**: Upward directory walking and multi-workspace repository caching.
 
 ---
 
@@ -26,7 +29,7 @@ The code-intelligence landscape for AI coding agents is currently split between 
 | Dimension | Colby McHenry (`@colbymchenry/codegraph`) | Ashvin KS (`codegraph`) | Strategic Advantage |
 | :--- | :--- | :--- | :--- |
 | **Tool Surface** | **1 monolithic tool**: `codegraph_explore` | **11 modular tools + new composite**: `overview`, `search_symbols`, `explain_symbol`, `context_slice`, `query_subgraph`, `impact_analysis`, `find_path`, `read_source_node`, `index_workspace`, `health`, `confirm_edge`, `dismiss_edge` | **Ashvin**: Specialized operations for macro, meso, and micro exploration. |
-| **Engine Core** | Precompiled native Rust binary (`codegraph-win32-x64`) + SQLite FTS5 | Node.js + `web-tree-sitter` (AST queries) + SQLite WAL with Recursive CTEs | **Ashvin**: Cross-platform portability without native build friction. |
+| **Parser Engine** | Rust AST + SQLite FTS5 | **100% Pure `web-tree-sitter` (WASM)** across daemon AND standalone MCP (Regex completely removed) | **Ashvin**: True compiler-grade AST parsing with zero native C++ toolchain required. |
 | **Token Consumption** | **Heavy**: 2,000 – 40,000 tokens per call. Dumps full files verbatim. | **Lean**: 100 – 1,200 tokens per call. Slices exact AST boundaries (functions/classes). | **Ashvin (75%–85% token savings)**: Prevents context exhaustion in long sessions. |
 | **Turn Latency** | **1 Turn**: Single prompt $\to$ response. | **1 Turn (with `context_slice`)** or 2–4 turns for deep micro surgery. | **Parity on 1-turn speed; Ashvin wins on token budget.** |
 | **Flow & Path Tracing** | **None**: Only inspects 1-hop callers. Cannot answer *"How does X reach Y?"* | **Built-in (`codegraph_find_path`)**: BFS shortest call-chain between any two symbols. | **Ashvin**: Critical for tracing architectural execution flows. |
@@ -56,6 +59,7 @@ The code-intelligence landscape for AI coding agents is currently split between 
                          ┌───────────────────────────┐
                          │   codegraph_context_slice │
                          │   1 Turn + ~1,000 Tokens  │
+                         │   + Pure Tree-Sitter WASM │
                          └───────────────────────────┘
 ```
 
@@ -66,7 +70,7 @@ The code-intelligence landscape for AI coding agents is currently split between 
 
 ### The Friction of Pre-v0.3.0 CodeGraph
 1. **The Tool Turn Tax**: To inspect `UserService` and understand its dependency on `UserRepo`, the agent had to invoke `codegraph_search_symbols` $\to$ wait $\to$ `codegraph_explain_symbol` $\to$ wait $\to$ `codegraph_explain_symbol(UserRepo)`.
-2. **Agent Impatience**: Autonomous agents (Claude Code, Cursor Agent, Gemini Antigravity) favor tools that minimize turns because each turn incurs a 2–5 second LLM round-trip.
+2. **Regex Parsing in Standalone MCP**: While the daemon used `web-tree-sitter`, the standalone MCP historically retained a regex fallback parser that missed complex arrow functions, destructured assignments, or multiline signatures.
 
 ---
 
@@ -99,7 +103,13 @@ The code-intelligence landscape for AI coding agents is currently split between 
 ### User Review Required
 
 > [!IMPORTANT]
-> ### 1. Primary Composite Tool: `codegraph_context_slice`
+> ### 1. 100% Tree-Sitter Everywhere (Regex Completely Removed)
+> - **Zero Regex**: Completely eradicate `PATTERNS`, regex line matchers, and regex tokenizers from `build-production/src/parser.js`.
+> - **Pure WASM**: Standalone MCP uses `web-tree-sitter` and `tree-sitter-wasms` directly. Because it is pure WebAssembly, it requires **zero native compilation** (no Python, no C++ compiler, no node-gyp).
+> - **21 Supported Languages**: TypeScript, TSX, JavaScript, Python, Rust, Go, C, C++, C#, Java, Ruby, PHP, Zig, Bash, Kotlin, Lua, Solidity, Swift, HTML, CSS, JSON, YAML.
+
+> [!IMPORTANT]
+> ### 2. Primary Composite Tool: `codegraph_context_slice`
 > In **a single round-trip turn**, returns:
 > 1. Target function's AST-bounded source code.
 > 2. AST-bounded excerpts of its **2–3 most critical callers and callees** (only the function definitions, NOT entire files!).
@@ -108,7 +118,7 @@ The code-intelligence landscape for AI coding agents is currently split between 
 > **Total payload**: ~800–1,200 tokens (vs. Colby's 10,000–30,000 tokens for full files), saving 3 sequential agent tool turns!
 
 > [!IMPORTANT]
-> ### 2. Dynamic Workspace Discovery & Multi-Repo Pooling
+> ### 3. Dynamic Workspace Discovery & Multi-Repo Pooling
 > - Add optional `workspace` parameter to all tools.
 > - Auto-discovery: If querying a file outside the default workspace, walk UP the directory tree to find the nearest `.codegraph/` or `.git/` folder.
 > - Multi-repo connection pool: Cache `GraphRepository` instances by workspace root so an agent working across multiple folders (e.g. `vscodeextension` and `Allentire-main`) can query both without restarting the MCP server.
@@ -117,7 +127,17 @@ The code-intelligence landscape for AI coding agents is currently split between 
 
 ### Proposed Code Changes
 
-#### Component 1: Engine & Repository Core (`build-production/src/repository.js` & `src/server/repository.ts`)
+#### Component 1: Parser Engine Upgrade (`build-production/src/parser.js` & `build-production/package.json`)
+- **Add WASM Dependencies to `build-production/package.json`**:
+  - Add `"web-tree-sitter": "^0.20.8"` and `"tree-sitter-wasms": "^0.1.13"`.
+- **Rewrite `build-production/src/parser.js` with Pure Tree-Sitter WASM**:
+  - Initialize `Parser.init()`.
+  - Load language WASM files via `tree-sitter-wasms`.
+  - Extract declarations (`function_declaration`, `method_definition`, `class_declaration`, `lexical_declaration` with arrow functions, etc.) using true AST syntax nodes.
+  - Parse calls (`call_expression`) and imports (`import_statement`) directly from AST query trees.
+  - Delete all legacy regex objects (`PATTERNS`, `CALL_KEYWORDS`, regex line-by-line matchers).
+
+#### Component 2: Engine & Repository Core (`build-production/src/repository.js` & `src/server/repository.ts`)
 - **Implement `getContextSlice(symbolName, file?, options)`**:
   - Resolve target node.
   - Query top $K$ callees and top $M$ callers.
@@ -126,7 +146,7 @@ The code-intelligence landscape for AI coding agents is currently split between 
 - **Centrality-Ranked Search (`searchSymbols`)**:
   - Order search results by `(name = ?) DESC, (in_degree + out_degree) DESC, LENGTH(name) ASC` so architectural hubs appear before peripheral variables.
 
-#### Component 2: Standalone MCP Server & Dynamic Workspace Manager (`build-production/bin/codegraph-mcp.js`)
+#### Component 3: Standalone MCP Server & Dynamic Workspace Manager (`build-production/bin/codegraph-mcp.js`)
 - **Multi-Workspace Connection Pool**:
   - `repoPool`: Map of `workspaceRoot -> GraphRepository`.
   - Auto-discover nearest `.codegraph/` or git root from passed `workspace` or `file`.
@@ -137,27 +157,31 @@ The code-intelligence landscape for AI coding agents is currently split between 
   - Format unified 1-turn response.
 - **Add optional `workspace` argument across all 11 existing tools**.
 
-#### Component 3: Documentation & Playbook
-- Update `README.md` and `ROADMAP.md` with the 3-tier pyramid and new tool reference.
+#### Component 4: Packaging & Assets
+- Update `scripts/build-production.mjs` and `scripts/copy-assets.mjs` to bundle WASM grammars into `build-production/wasm/` or vendor them cleanly.
+- Update `README.md` and `ROADMAP.md` with the pure Tree-Sitter engine and 3-tier pyramid.
 - Update Antigravity schemas in `~/.gemini/antigravity/mcp/codegraph/`.
 
 ---
 
 ### Verification Plan for v0.3.0
 
-1. **Automated Vitest Suite** (`npm test`):
-   - Test `getContextSlice`: verifies target AST + caller ASTs + callee ASTs returned in single call.
+1. **Tree-Sitter AST Purity Verification**:
+   - Verify `build-production/src/parser.js` contains 0 regex declaration matchers.
+   - Verify parsing TypeScript, Python, and Rust source files generates AST nodes via `web-tree-sitter`.
+2. **Automated Vitest Suite** (`npm test`):
+   - Test `getContextSlice`: verifies target AST + caller ASTs + callee ASTs returned in a single call.
    - Test dynamic workspace discovery and repo pool caching.
    - Test centrality-ranked search.
-2. **Production Smoke Test** (`npm run build:production`):
+3. **Production Smoke Test** (`npm run build:production`):
    - Assert all 12 primary tools registered (0 duplicates).
-   - Test `codegraph_context_slice` over stdio.
+   - Test `codegraph_context_slice` over stdio with pure tree-sitter.
    - Test dynamic workspace override over stdio.
-3. **Build & Typecheck**:
+4. **Build & Typecheck**:
    - `npm run lint` && `npm run typecheck`.
-4. **Live Dogfooding in this Repository**:
+5. **Live Dogfooding in this Repository**:
    - Run `codegraph_context_slice(symbol: "createApp")` and assert:
-     - Contains `createApp` source excerpt.
+     - Contains `createApp` source excerpt extracted via Tree-Sitter AST.
      - Contains `assertWorkspace` and `auth` source excerpts.
      - Contains callers and blast radius count.
      - Response size is within 1,200 tokens.
@@ -173,12 +197,13 @@ The code-intelligence landscape for AI coding agents is currently split between 
         ▼                    ▼                     ▼                    ▼
    [Phase 1: v0.3.0]    [Phase 2: v0.4.0]     [Phase 3: v0.5.0]    [Phase 4: v0.6.0]
    The "Colby Killer"   Hybrid Search         Monorepo Scale       Agent Guardrails
-   - Context Slicing    - SQLite-vec          - Package federation - Refactor checklist
-   - Dynamic Paths      - Intent matching     - Cross-module types - Continuous watcher
-   - 1-Turn Composite   - Semantic graph      - Branch snapshots   - Dead code detection
+   - Pure Tree-Sitter   - SQLite-vec          - Package federation - Refactor checklist
+   - Context Slicing    - Intent matching     - Cross-module types - Continuous watcher
+   - Dynamic Paths      - Semantic graph      - Branch snapshots   - Dead code detection
 ```
 
 ### Phase 1: v0.3.0 — The "Colby Killer" (Immediate Execution)
+- 100% Tree-Sitter Everywhere (Regex completely eliminated).
 - 1-Turn Composite Tool (`codegraph_context_slice`).
 - Dynamic Multi-Workspace Auto-Discovery & Pool.
 - Centrality-Ranked Search.
@@ -215,6 +240,7 @@ The code-intelligence landscape for AI coding agents is currently split between 
 | :--- | :---: | :---: | :---: |
 | **Token Consumption** | High (reads entire files) | Very High (10k–40k tokens) | **Minimal (100–1,200 tokens)** |
 | **Turn Latency** | High (5+ turns) | **Low (1 turn)** | **Low (1 turn via `context_slice`)** |
+| **Parsing Fidelity** | N/A (unstructured text) | Native Tree-sitter AST | **100% Pure Tree-Sitter AST (Zero Regex)** |
 | **Context Window Preservation** | Poor | Very Poor (exhausts context) | **Optimal (preserves 30+ turn memory)** |
 | **Architectural Depth** | Zero | 1-hop only | **Multi-hop BFS paths & Hub Centrality** |
 | **Pre-Edit Safety** | Manual | Caller list | **Recursive Blast Radius CTE** |
