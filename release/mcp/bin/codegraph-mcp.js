@@ -6,7 +6,12 @@
 // - Tier 3: Micro (Surgical inspections, blast radius, edge curation)
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema
+} from "@modelcontextprotocol/sdk/types.js";
 import { existsSync, copyFileSync, mkdirSync, statSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -379,7 +384,7 @@ async function indexWorkspace(args, r = ensureRepo(args.workspace)) {
 
 const server = new Server(
   { name: "codegraph", version: "0.3.0" },
-  { capabilities: { tools: {} } }
+  { capabilities: { tools: {}, prompts: {} } }
 );
 
 function num(val, fallback) {
@@ -393,7 +398,7 @@ function symbolSchema() {
       symbol: { type: "string", description: "Symbol name to look up globally across the indexed codebase (e.g. 'createApp', 'CodeParser')." },
       file: { type: "string", description: "Path to file inside workspace. Optional if symbol is specified." },
       line: { type: "integer", minimum: 1, description: "1-based line number. Optional if symbol is specified." },
-      workspace: { type: "string", description: "Optional workspace root directory override." },
+      workspace: { type: "string", description: "Optional workspace root directory override. Allows querying any repository on the fly." },
       format: { type: "string", enum: ["compact", "mermaid", "json"], description: "Output format, default 'compact'." },
       source_budget: { type: "integer", minimum: 100, maximum: 8000, description: "Max characters of source code to return, default 1500." }
     },
@@ -404,11 +409,11 @@ function symbolSchema() {
 const primaryTools = [
   {
     name: "codegraph_overview",
-    description: "[Tier 1: Macro - Start Here] High-level architectural map of the codebase. Detects entrypoints (main, activate, createApp), degree-centrality hub symbols with the most callers/callees, languages, and index stats. Call this FIRST when exploring any unfamiliar codebase.",
+    description: "[TIER 1: MACRO — ARCHITECTURAL MAP] High-level codebase map. Call this FIRST when entering an unfamiliar codebase. Detects entrypoints (main, activate, createApp, run), degree-centrality hub symbols with the most callers/callees, languages, and index stats.",
     inputSchema: {
       type: "object",
       properties: {
-        workspace: { type: "string", description: "Optional workspace root directory override." },
+        workspace: { type: "string", description: "Optional workspace root directory override. Allows querying any repository on the fly." },
         top_n: { type: "integer", minimum: 1, maximum: 50, description: "Number of top hub symbols to return, default 10." },
         format: { type: "string", enum: ["compact", "json"], description: "Output format, default 'compact'." }
       },
@@ -417,7 +422,7 @@ const primaryTools = [
   },
   {
     name: "codegraph_search_symbols",
-    description: "[Tier 3: Find Symbols] Fast degree-centrality ranked search for symbol names across the entire workspace. Returns symbol names, kinds (function/class/interface), files, and line numbers. Common keywords surface architectural hubs first.",
+    description: "[TIER 3: MICRO — SYMBOL SEARCH] Fast degree-centrality ranked search for symbol names across the entire workspace. Returns symbol names, kinds (function/class/interface), files, and line numbers. Architectural hubs surface before minor variables.",
     inputSchema: {
       type: "object",
       properties: {
@@ -433,12 +438,12 @@ const primaryTools = [
   },
   {
     name: "codegraph_context_slice",
-    description: "[Tier 2: Meso - Daily Driver / 1-Turn Answer] Returns the complete context cluster in 1 single turn: AST-bounded source of the target symbol + AST-bounded sources of its top callers and callees (just the functions, NOT entire files!) + blast radius impact summary + mini Mermaid diagram (~800-1200 tokens). Eliminates multi-turn tool calling.",
+    description: "[TIER 2: MESO — PRIMARY WORKHORSE TOOL] 1-Turn Composite Context Slice. Call this FIRST whenever you need to understand, explain, or work on a function, method, or class. Returns in a single turn: (1) AST-bounded source of the target symbol, (2) AST-bounded excerpts of top 2-3 callers and callees (just the functions, NOT entire files!), (3) blast radius impact summary & test coverage, (4) micro Mermaid diagram (~800-1200 tokens). Eliminates multi-turn tool chasing and saves 95%+ context window tokens compared to full-file reading.",
     inputSchema: {
       type: "object",
       properties: {
-        symbol: { type: "string", description: "Target symbol name to inspect." },
-        file: { type: "string", description: "Optional file path if symbol name is ambiguous." },
+        symbol: { type: "string", description: "Target symbol name to inspect (e.g. 'createApp', 'WorkspaceIndexer')." },
+        file: { type: "string", description: "Optional file path if symbol name is ambiguous across multiple files." },
         workspace: { type: "string", description: "Optional workspace root directory override." },
         max_callees: { type: "integer", minimum: 1, maximum: 10, description: "Max direct dependencies (callees) to excerpt, default 3." },
         max_callers: { type: "integer", minimum: 1, maximum: 10, description: "Max callers to excerpt, default 2." },
@@ -450,17 +455,17 @@ const primaryTools = [
   },
   {
     name: "codegraph_explain_symbol",
-    description: "[Tier 3: Understand Code] Deep symbol inspection. Returns verified calls (outgoing), callers (incoming), AST-bounded source excerpt, and grounded summary. Can be queried by symbol name alone, or file+line. Supports format='compact' (token-saving), 'mermaid' (diagram), or 'json'.",
+    description: "[TIER 3: MICRO — GROUNDED EXPLANATION] Deep symbol inspection. Returns verified incoming callers, outgoing calls, AST-bounded source excerpt, and grounded summary. Can be queried by symbol name or file+line. Supports format='compact', 'mermaid', or 'json'.",
     inputSchema: symbolSchema()
   },
   {
     name: "codegraph_query_subgraph",
-    description: "[Tier 3: Relationship Graph] Return relationship graph for a symbol showing callers, callees, and type dependencies. Supports format='compact', 'mermaid', or 'json'.",
+    description: "[TIER 3: MICRO — RELATIONSHIP SUBGRAPH] Bounded relationship graph for a symbol showing direct callers, callees, and dependencies. Supports format='compact', 'mermaid', or 'json'.",
     inputSchema: symbolSchema()
   },
   {
     name: "codegraph_impact_analysis",
-    description: "[Tier 3: Pre-Edit Safety] Blast radius analysis. Traces all direct and indirect downstream dependents and callers up to N hops away. Run this BEFORE editing or refactoring a function to know what might break.",
+    description: "[TIER 3: MICRO — MANDATORY PRE-EDIT SAFETY] Blast radius analysis. Traces all direct and indirect downstream dependents and callers up to N hops away via recursive CTE. ALWAYS run this tool BEFORE modifying, refactoring, or deleting any function or interface to verify every component that might break.",
     inputSchema: {
       type: "object",
       properties: {
@@ -476,7 +481,7 @@ const primaryTools = [
   },
   {
     name: "codegraph_find_path",
-    description: "[Tier 1: Architecture Explorer] Shortest call-chain path connecting from_symbol to to_symbol. Explains how execution flows from one component to another (e.g., from 'activate' to 'createApp').",
+    description: "[TIER 1: MACRO — EXECUTION FLOW TRACER] BFS shortest call-chain routing between from_symbol and to_symbol. Explains how execution and control flow from entrypoints down to utilities (e.g. from 'activate' to 'createApp').",
     inputSchema: {
       type: "object",
       properties: {
@@ -492,12 +497,12 @@ const primaryTools = [
   },
   {
     name: "codegraph_read_source_node",
-    description: "Return ONLY the AST-bounded source excerpt for a symbol. Can query by symbol name alone, or file+line.",
+    description: "[TIER 3: MICRO — SURGICAL AST EXCERPT] Returns ONLY the exact AST-bounded source code window for a specific symbol. Use this instead of reading 500+ line files with cat or file readers.",
     inputSchema: symbolSchema()
   },
   {
     name: "codegraph_index_workspace",
-    description: "Build or update the SQLite structural graph for the workspace using 100% pure Tree-Sitter WASM. Supports incremental indexing via dirty_only: true.",
+    description: "[MAINTENANCE — FAST INCREMENTAL RE-INDEX] Builds or updates the SQLite structural graph using 100% pure Tree-Sitter WASM. After modifying files, run with dirty_only: true to re-index only changed files via git status in <1 second.",
     inputSchema: {
       type: "object",
       properties: {
@@ -511,7 +516,7 @@ const primaryTools = [
   },
   {
     name: "codegraph_health",
-    description: "Check health of the CodeGraph database, indexed scope, and pooled workspaces.",
+    description: "[DIAGNOSTICS] Check health of the CodeGraph database, indexed scope, file counts, edge counts, and active multi-workspace pool status.",
     inputSchema: {
       type: "object",
       properties: {
@@ -522,7 +527,7 @@ const primaryTools = [
   },
   {
     name: "codegraph_confirm_edge",
-    description: "Human/agent feedback loop: confirm an inferred code edge as ground-truth verified.",
+    description: "[FEEDBACK LOOP] Confirm an inferred code edge as ground-truth verified in the graph database.",
     inputSchema: {
       type: "object",
       properties: {
@@ -535,7 +540,7 @@ const primaryTools = [
   },
   {
     name: "codegraph_dismiss_edge",
-    description: "Human/agent feedback loop: dismiss a false-positive inferred code edge.",
+    description: "[FEEDBACK LOOP] Dismiss a false-positive inferred code edge from the graph database.",
     inputSchema: {
       type: "object",
       properties: {
@@ -548,6 +553,39 @@ const primaryTools = [
   }
 ];
 
+const CODEGRAPH_AGENT_PLAYBOOK = `# CodeGraph AI Agent Operational Guide & Playbook
+
+You have access to CodeGraph, an offline, local-first AST code intelligence engine powered by 100% pure Tree-Sitter WebAssembly parsers and a SQLite graph database with recursive CTEs.
+
+## The 3-Tier Codebase Exploration Pyramid:
+
+### 1. Tier 1: Macro (Architecture & Map)
+- **codegraph_overview**: Call this FIRST when entering any unfamiliar codebase to discover entrypoints (main, activate, createApp, run), high-centrality hub symbols, and language distribution.
+- **codegraph_find_path**: Trace execution flow between an entrypoint and a subsystem (from_symbol -> to_symbol) using BFS shortest call-path routing.
+
+### 2. Tier 2: Meso (The Daily Driver — 1-Turn Context Ingestion)
+- **codegraph_context_slice**: YOUR PRIMARY WORKHORSE TOOL. Whenever asked how a function, class, or method works, call codegraph_context_slice(symbol="name").
+  In 1 single turn, it returns:
+  1. The target symbol's exact AST-bounded source code.
+  2. The AST-bounded excerpts of its top 2-3 callers and callees (just the functions, NOT entire files!).
+  3. Blast radius summary & test coverage detection.
+  4. A micro Mermaid diagram.
+  Payload size: ~800–1,200 tokens (saves 95%+ context window tokens vs. whole-file dumping).
+
+### 3. Tier 3: Micro (Surgical Surgery & Pre-Edit Safety)
+- **codegraph_impact_analysis**: MANDATORY BEFORE ANY CODE MODIFICATIONS. Traces all direct and indirect downstream callers and dependents up to N hops away via recursive CTE. Run this before editing or refactoring to prevent breaking downstream code.
+- **codegraph_search_symbols**: Degree-centrality ranked fuzzy search across all symbols. Architectural hubs surface first.
+- **codegraph_read_source_node**: Extract ONLY the AST-bounded source code window for a specific symbol without reading surrounding lines.
+- **codegraph_query_subgraph**: View direct callers, callees, and dependencies.
+- **codegraph_index_workspace**: Run with dirty_only: true after making code edits to refresh the graph in <1 second.
+
+## Strict Agent Directives:
+- NEVER read entire 500+ line files with cat or file readers when exploring functions; use codegraph_context_slice.
+- NEVER make multiple sequential tool calls guessing callers; codegraph_context_slice delivers target + callers + callees in one shot.
+- NEVER edit or rename exported symbols without running codegraph_impact_analysis first.
+- To query external repositories without restarting, pass the workspace parameter (e.g. workspace: "/path/to/repo").
+`;
+
 function tools() {
   return primaryTools;
 }
@@ -555,6 +593,61 @@ function tools() {
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: tools()
 }));
+
+server.setRequestHandler(ListPromptsRequestSchema, async () => ({
+  prompts: [
+    {
+      name: "codegraph_playbook",
+      description: "Complete 3-Tier agent exploration hierarchy, operational directives, and anti-patterns for using CodeGraph.",
+      arguments: []
+    },
+    {
+      name: "pre_edit_safety_check",
+      description: "Blast radius inspection and pre-edit verification workflow before modifying code.",
+      arguments: [
+        {
+          name: "symbol",
+          description: "Target symbol name to inspect before modifying.",
+          required: true
+        }
+      ]
+    }
+  ]
+}));
+
+server.setRequestHandler(GetPromptRequestSchema, async (msg) => {
+  const { name, arguments: args } = msg.params;
+  if (name === "codegraph_playbook") {
+    return {
+      description: "CodeGraph Agent Operational Guide",
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: CODEGRAPH_AGENT_PLAYBOOK
+          }
+        }
+      ]
+    };
+  }
+  if (name === "pre_edit_safety_check") {
+    const sym = args?.symbol ?? "target_symbol";
+    return {
+      description: `Pre-edit safety workflow for ${sym}`,
+      messages: [
+        {
+          role: "user",
+          content: {
+            type: "text",
+            text: `Follow the CodeGraph Pre-Edit Safety Protocol for '${sym}':\n1. Run codegraph_impact_analysis(symbol='${sym}') to verify all downstream callers and dependents.\n2. Run codegraph_context_slice(symbol='${sym}') to inspect the target AST alongside top callers and callees.\n3. Verify test coverage in the blast radius.\n4. Apply your edits.\n5. Run codegraph_index_workspace(dirty_only=true) to immediately sync the code graph.`
+          }
+        }
+      ]
+    };
+  }
+  throw new Error(`Unknown prompt: ${name}`);
+});
 
 function textResult(payload) {
   const text = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);

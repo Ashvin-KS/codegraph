@@ -23,80 +23,159 @@ It explains symbols from your codebase using a local graph, optional local LLM c
 
 ---
 
-## Installation
+## Installation & Setup
 
 ### 1. VS Code Extension
 
 #### From GitHub Releases (Recommended)
-Download [`codegraph-0.2.0.vsix`](https://github.com/Ashvin-KS/codegraph/releases/tag/v0.2.0) from the [v0.2.0 Release](https://github.com/Ashvin-KS/codegraph/releases/tag/v0.2.0).
+Download [`codegraph-0.3.0.vsix`](https://github.com/Ashvin-KS/codegraph/releases/tag/v0.3.0) from the [v0.3.0 Release](https://github.com/Ashvin-KS/codegraph/releases/tag/v0.3.0).
 
 Install via CLI:
 ```powershell
-code --install-extension codegraph-0.2.0.vsix
+code --install-extension codegraph-0.3.0.vsix
 ```
 Or via VS Code UI:
-1. Open VS Code → Extensions (`Ctrl+Shift+X`).
+1. Open VS Code → Extensions (`Ctrl+Shift+X` / `Cmd+Shift+X`).
 2. Click **`...`** (Views and More Actions) in the top-right corner.
-3. Select **Install from VSIX...** and pick `codegraph-0.2.0.vsix`.
+3. Select **Install from VSIX...** and select `codegraph-0.3.0.vsix`.
 
 #### Or Build from Source
 ```powershell
 npm install
 npm run build
 npm run package
-code --install-extension codegraph-0.2.0.vsix
+code --install-extension codegraph-0.3.0.vsix
 ```
 
 ---
 
-### 2. Standalone MCP Server (Claude Desktop & Claude Code)
+### 2. Standalone MCP Server (Any AI Client)
 
-The `build-production/` folder is **100% independent** (requires only Node.js 20+ and SQLite). No VS Code or monorepo needed.
+The `build-production/` folder is **100% independent** (requires only Node.js 20+ and SQLite). It has **zero runtime dependencies** on VS Code, the KiloCode monorepo, or local daemons.
 
-#### Option A: One-Command Setup for Claude Desktop
+#### Step 1: Install Globally
 ```powershell
-cd build-production
-npm install
-node ./bin/codegraph-setup.js --workspace C:/path/to/your-project
-```
-*Restart Claude Desktop — done!*
+# From the repository root or build-production:
+npm install -g ./build-production
 
-To remove the entry later:
+# Or directly from the release bundle:
+npm install -g ./release/mcp
+```
+*This places `codegraph-mcp` and `codegraph-setup` on your system `PATH`.*
+
+#### Step 2: Choose Execution Mode
+
+- **Mode A: Dynamic Multi-Workspace Pool (Recommended)**:
+  Run `codegraph-mcp` with **no arguments**. CodeGraph will automatically auto-discover the project root (finding the nearest `.codegraph/` or `.git/` folder) based on whichever file or folder is queried, and keep active workspaces pooled in memory.
+- **Mode B: Fixed Workspace**:
+  Pass `--workspace <path>` to pin the MCP server to a specific project.
+
+---
+
+### 3. MCP Client Configuration Guides
+
+#### Claude Desktop (`claude_desktop_config.json`)
+Location:
+- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Linux**: `~/.config/Claude/claude_desktop_config.json`
+
+**Automated Setup:**
 ```powershell
-node ./bin/codegraph-setup.js --workspace . --uninstall
+node ./build-production/bin/codegraph-setup.js --workspace C:/path/to/your-project
 ```
 
-#### Option B: Manual Config for Claude Desktop
-Add to your `claude_desktop_config.json` (`%APPDATA%\Claude\` on Windows, `~/Library/Application Support/Claude/` on macOS):
-
+**Manual JSON Config:**
 ```json
 {
   "mcpServers": {
     "codegraph": {
-      "command": "node",
-      "args": [
-        "C:/path/to/codegraph/build-production/bin/codegraph-mcp.js",
-        "--workspace",
-        "C:/path/to/your-project"
+      "command": "codegraph-mcp"
+    }
+  }
+}
+```
+*(If `codegraph-mcp` is not installed globally, replace `"command": "codegraph-mcp"` with `"command": "node"` and `"args": ["C:/path/to/build-production/bin/codegraph-mcp.js"]`)*.
+
+#### Claude Code CLI
+```powershell
+claude mcp add codegraph -- codegraph-mcp
+```
+
+#### Cursor IDE (`.cursor/mcp.json`)
+Create or edit `.cursor/mcp.json` in your project root or configure in **Cursor Settings → Features → MCP**:
+```json
+{
+  "mcpServers": {
+    "codegraph": {
+      "command": "codegraph-mcp"
+    }
+  }
+}
+```
+
+#### Windsurf IDE (`mcp_config.json`)
+Add to `~/.codeium/windsurf/mcp_config.json`:
+```json
+{
+  "mcpServers": {
+    "codegraph": {
+      "command": "codegraph-mcp"
+    }
+  }
+}
+```
+
+#### Google Antigravity / Gemini CLI
+Add to your project's `mcp_config.json` or `~/.gemini/antigravity/mcp/`:
+```json
+{
+  "mcpServers": {
+    "codegraph": {
+      "command": "codegraph-mcp"
+    }
+  }
+}
+```
+
+#### Cline & Roo-Code (`mcpSettings.json`)
+Add to your global or workspace `mcpSettings.json`:
+```json
+{
+  "mcpServers": {
+    "codegraph": {
+      "command": "codegraph-mcp",
+      "disabled": false,
+      "autoApprove": [
+        "codegraph_overview",
+        "codegraph_search_symbols",
+        "codegraph_context_slice",
+        "codegraph_explain_symbol",
+        "codegraph_impact_analysis",
+        "codegraph_find_path",
+        "codegraph_read_source_node",
+        "codegraph_health"
       ]
     }
   }
 }
 ```
 
-#### Option C: Claude Code CLI
-Add directly to Claude Code (automatically uses the project you run Claude Code in, or pass `--workspace`):
-```powershell
-claude mcp add codegraph -- node C:/path/to/codegraph/build-production/bin/codegraph-mcp.js
-```
-Or after installing globally (`npm install -g ./build-production`):
-```powershell
-claude mcp add codegraph -- codegraph-mcp
+#### Zed Editor (`settings.json`)
+Add under `context_servers` in Zed's `settings.json`:
+```json
+{
+  "context_servers": {
+    "codegraph": {
+      "command": "codegraph-mcp"
+    }
+  }
+}
 ```
 
 ---
 
-### 3. One-Command Automated Installer (`release/`)
+### 4. One-Command Automated Installer (`release/`)
 
 From the `release/` folder or downloaded release bundle:
 
@@ -109,17 +188,16 @@ From the `release/` folder or downloaded release bundle:
 ```bash
 ./install.sh --workspace /path/to/your-project
 ```
-This installs the global MCP server, configures Claude Desktop, and installs the `.vsix` in one step.
-Pass `-SkipMcp` or `-SkipExtension` to install only one.
+This installs the global MCP server, writes the Claude Desktop configuration, and installs the `.vsix` in one step. Pass `-SkipMcp` or `-SkipExtension` to selectively install components.
 
 ---
 
-### 4. Developer / Build Verification
+### 5. Developer / Build Verification
 
 ```powershell
 npm run lint              # ESLint check
 npm run typecheck         # TypeScript check
-npm test                  # Vitest regression test suite
+npm test                  # Vitest regression test suite (13/13 passing)
 npm run build:production  # Standalone MCP stdio smoke test
 npm run release           # Assembles release/ distribution bundle
 ```
@@ -221,27 +299,36 @@ Env: `CODEGRAPH_WORKSPACE`, `CODEGRAPH_LOCKFILE`, `CODEGRAPH_DB`, `CODEGRAPH_GLO
 
 ## Agent Playbook: The 3-Tier Execution Order
 
-AI agents should organize exploration into three tiers:
+> 📖 **Full Specification**: See [AI_INSTRUCTIONS.md](file:///c:/Developer/Code/vscodeextension/AI_INSTRUCTIONS.md) for the complete LLM system prompt, cross-repository routing guide, and token economics benchmarks.
+
+AI agents (Claude, GPT-4o, Gemini 2.0 Pro) should organize exploration into three tiers:
 
 ### Tier 1: Macro (Architecture & Map)
-- **`codegraph_overview`**: Call this FIRST in unfamiliar workspaces. Returns entrypoints (`main`, `activate`, `createApp`), centrality hubs, and language statistics.
-- **`codegraph_find_path`**: Trace execution flow between any two symbols (`from_symbol` -> `to_symbol`).
+- **`codegraph_overview`**: Call this FIRST in unfamiliar workspaces. Returns entrypoints (`main`, `activate`, `createApp`, `run`), degree-centrality hubs, and language statistics.
+- **`codegraph_find_path`**: Trace execution flow between any two symbols (`from_symbol` -> `to_symbol`) using BFS call-chain routing.
 
 ### Tier 2: Meso (Daily Driver — 1-Turn Context Ingestion)
-- **`codegraph_context_slice`**: **The default tool for answering coding questions in 1 turn.** Returns:
-  1. Target function's AST-bounded source.
-  2. Top 2–3 callers and callees (just the functions, NOT entire files!).
+- **`codegraph_context_slice`** ⭐ **[PRIMARY WORKHORSE TOOL]**: The default tool for answering coding questions in **1 single turn**. Returns:
+  1. Target function's exact AST-bounded source code.
+  2. Top 2–3 callers and callees (just the functions, **NOT** entire files!).
   3. Blast radius summary & test coverage detection.
   4. Micro Mermaid diagram.
-  Total payload: ~800–1,200 tokens (vs. Colby's 10,000–30,000 tokens for full files).
+  Total payload: **~800–1,200 tokens** (vs. Colby McHenry's 10,000–30,000 tokens for whole files), saving **95%+ of your context window** and eliminating 3–5 sequential tool turns.
 
-### Tier 3: Micro (Surgical Surgery & Pre-Edit Safety)
-- **`codegraph_search_symbols`**: Fast degree-centrality ranked search across the workspace.
-- **`codegraph_impact_analysis`**: Blast radius recursive CTE tracing all downstream dependents up to $N$ hops away. Run BEFORE editing a symbol.
-- **`codegraph_explain_symbol`**: Deep inspection with verified call relationships, callers, AST excerpt, and grounded summary.
-- **`codegraph_query_subgraph`**: Relationship subgraph showing callers, callees, and type dependencies.
-- **`codegraph_read_source_node`**: Extract AST-bounded code window for a symbol.
+### Tier 3: Micro (Surgical Precision & Pre-Edit Safety)
+- **`codegraph_impact_analysis`** ⚠️ **[MANDATORY PRE-EDIT TOOL]**: Blast radius recursive CTE tracing all downstream dependents up to $N$ hops away. **ALWAYS run this BEFORE editing, renaming, or refactoring a symbol.**
+- **`codegraph_search_symbols`**: Fast degree-centrality ranked search across the workspace. Architectural hubs surface before minor variables.
+- **`codegraph_read_source_node`**: Extract AST-bounded code window for a symbol without reading surrounding lines.
+- **`codegraph_query_subgraph`**: Relationship subgraph showing callers, callees, and type dependencies (`compact`, `mermaid`, or `json`).
+- **`codegraph_index_workspace`**: Incremental Git-aware re-indexer. Run with `dirty_only: true` after code edits to refresh the index in <1 second.
 - **`codegraph_confirm_edge`** / **`codegraph_dismiss_edge`**: Curate inferred edges.
+
+### Strict Agent Directives:
+- ❌ **Never dump whole 500+ line files** with file readers or `cat` when investigating function logic; use `codegraph_context_slice`.
+- ❌ **Never make 3–5 sequential tool turns** guessing callers and callees; `codegraph_context_slice` delivers the entire cluster in 1 turn.
+- ❌ **Never edit or refactor code** without running `codegraph_impact_analysis` first.
+- ❌ **Never re-index the whole repository** after a minor edit; use `codegraph_index_workspace(dirty_only=true)`.
+- 🌐 **Multi-Repo Routing**: Pass `workspace: "/path/to/repo"` to any tool to query external projects without restarting the server.
 
 ---
 
