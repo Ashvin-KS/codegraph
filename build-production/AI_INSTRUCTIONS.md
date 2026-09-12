@@ -179,3 +179,139 @@ Follow this 3-tier workflow:
 4. Keep Index Fresh: Run `codegraph_index_workspace(dirty_only=true)` after applying file edits to refresh the index in <1s.
 5. Multi-Repo: Pass `workspace: "/path/to/repo"` to query external workspaces on the fly.
 ```
+
+---
+
+## 6. Complete Tool Call Syntax Cheatsheet (12 Tools)
+
+Below is the precise JSON syntax and arguments for every CodeGraph MCP tool:
+
+### 1. `codegraph_overview` (Tier 1: Architectural Map)
+```json
+{
+  "top_n": 10,
+  "format": "compact",
+  "workspace": "/optional/override/path"
+}
+```
+
+### 2. `codegraph_context_slice` (Tier 2: Primary Daily Driver)
+```json
+{
+  "symbol": "createApp",
+  "file": "src/server/routes.ts",
+  "max_callees": 3,
+  "max_callers": 2,
+  "format": "compact",
+  "workspace": "/optional/override/path"
+}
+```
+*Note: `file`, `max_callees`, `max_callers`, `format`, and `workspace` are optional. Calling with just `{"symbol": "createApp"}` works immediately.*
+
+### 3. `codegraph_impact_analysis` (Tier 3: Mandatory Pre-Edit Safety)
+```json
+{
+  "symbol": "assertWorkspace",
+  "max_depth": 3,
+  "format": "compact",
+  "workspace": "/optional/override/path"
+}
+```
+
+### 4. `codegraph_search_symbols` (Tier 3: Symbol Discovery)
+```json
+{
+  "query": "Workspace",
+  "kind": "class",
+  "limit": 20,
+  "format": "compact",
+  "workspace": "/optional/override/path"
+}
+```
+*Allowed values for `kind`: `"function"`, `"class"`, `"interface"`, `"variable"`.*
+
+### 5. `codegraph_find_path` (Tier 1: Flow Routing)
+```json
+{
+  "from_symbol": "activate",
+  "to_symbol": "createApp",
+  "max_depth": 6,
+  "format": "compact",
+  "workspace": "/optional/override/path"
+}
+```
+
+### 6. `codegraph_explain_symbol` (Tier 3: Grounded Explanation)
+```json
+{
+  "symbol": "createApp",
+  "format": "compact",
+  "source_budget": 1500
+}
+```
+*Or query by file and line without symbol name:*
+```json
+{
+  "file": "src/server/routes.ts",
+  "line": 77,
+  "format": "compact"
+}
+```
+
+### 7. `codegraph_read_source_node` (Tier 3: Exact AST Slice)
+```json
+{
+  "symbol": "assertWorkspace"
+}
+```
+
+### 8. `codegraph_query_subgraph` (Tier 3: Relational Graph)
+```json
+{
+  "symbol": "createApp",
+  "format": "mermaid"
+}
+```
+
+### 9. `codegraph_index_workspace` (Maintenance: Sub-second Re-index)
+```json
+{
+  "dirty_only": true
+}
+```
+*For complete full wipe & re-index: `{"force_reindex": true}`.*
+
+### 10. `codegraph_health` (Diagnostics)
+```json
+{
+  "workspace": "/optional/override/path"
+}
+```
+
+### 11. `codegraph_confirm_edge` (Feedback)
+```json
+{
+  "edge_id": 42
+}
+```
+
+### 12. `codegraph_dismiss_edge` (Feedback)
+```json
+{
+  "edge_id": 42
+}
+```
+
+---
+
+## 7. Actionable Error Recovery for Agents
+
+If you ever receive an error message from CodeGraph, use this recovery playbook:
+
+1. **`SYMBOL_NOT_FOUND: Did you mean one of these?`**
+   - CodeGraph automatically fuzzy-searches similar symbols in the SQLite graph and provides close matches. Use the suggested exact symbol name or file path.
+2. **`UNINDEXED: The workspace has 0 indexed files`**
+   - Call `codegraph_index_workspace` to populate `graph.db`.
+3. **`FILE_NOT_FOUND: The file does not exist in workspace`**
+   - Verify the relative path or call `codegraph_search_symbols(query="...")` to locate where the symbol lives.
+
