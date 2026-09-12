@@ -1,35 +1,31 @@
 #!/usr/bin/env node
-// CodeGraph standalone MCP server — no VS Code, no daemon, no monorepo.
-// Opens <workspace>/.codegraph/graph.db (migrates legacy .duckgraph/graph.db)
-// and answers all tools in-process over stdio.
-import fs from "node:fs/promises";
-import { existsSync, mkdirSync, copyFileSync } from "node:fs";
-import path from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+// Standalone CodeGraph MCP server over stdio.
+// Exposes the 3-Tier Code Intelligence Suite:
+// - Tier 1: Macro (Architecture, Entrypoints, Hubs, Call-Paths)
+// - Tier 2: Meso (1-Turn Composite Context Slicing: target + callers + callees)
+// - Tier 3: Micro (Surgical inspections, blast radius, edge curation)
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { existsSync, copyFileSync, mkdirSync, statSync } from "node:fs";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { openDatabase } from "../src/db.js";
 import { GraphRepository } from "../src/repository.js";
 import { parseFile, readNodeBody } from "../src/parser.js";
 import { languageIdForFile } from "../src/protocol.js";
-import { assertInsideWorkspace, normalizeWorkspaceFile } from "../src/fs.js";
 
 const execFileAsync = promisify(execFile);
 
-const SKIP = new Set([
-  ".git", ".codegraph", ".duckgraph", "node_modules", "dist", "out",
-  "build", "build-production", "target", ".venv", "venv", "__pycache__",
-  ".next", ".nuxt", "bin", "obj", ".idea", ".vscode", "coverage"
-]);
-
 function arg(name) {
-  const i = process.argv.indexOf(`--${name}`);
-  return i >= 0 ? process.argv[i + 1] : undefined;
+  const idx = process.argv.indexOf(`--${name}`);
+  if (idx >= 0 && idx + 1 < process.argv.length) return process.argv[idx + 1];
+  return null;
 }
 
-function workspaceRoot() {
+function defaultWorkspaceRoot() {
   return path.resolve(
     arg("workspace") ?? arg("workspaceRoot") ??
     process.env.CODEGRAPH_WORKSPACE ?? process.env.DUCKGRAPH_WORKSPACE ??
@@ -55,16 +51,43 @@ function resolveDbPath(root) {
   return next;
 }
 
-let repo = null;
-let db = null;
-let root = null;
+// Multi-Workspace Connection Pool: rootPath -> { repo, db, root }
+const repoPool = new Map();
 
-function ensureRepo() {
-  if (repo) return repo;
-  root = workspaceRoot();
-  db = openDatabase(resolveDbPath(root));
-  repo = new GraphRepository(db, root);
-  return repo;
+function findWorkspaceRoot(explicitWorkspace, fileHint) {
+  if (explicitWorkspace) return path.resolve(explicitWorkspace);
+  if (fileHint) {
+    let current = path.resolve(fileHint);
+    try {
+      if (existsSync(current) && statSync(current).isFile()) {
+        current = path.dirname(current);
+      }
+    } catch {}
+    while (true) {
+      if (existsSync(path.join(current, ".codegraph", "graph.db")) ||
+          existsSync(path.join(current, ".duckgraph", "graph.db")) ||
+          existsSync(path.join(current, ".git"))) {
+        return current;
+      }
+      const parent = path.dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+  }
+  return defaultWorkspaceRoot();
+}
+
+function ensureRepo(explicitWorkspace, fileHint) {
+  const root = findWorkspaceRoot(explicitWorkspace, fileHint);
+  let entry = repoPool.get(root);
+  if (!entry) {
+    const dbPath = resolveDbPath(root);
+    const db = openDatabase(dbPath);
+    const repo = new GraphRepository(db, root);
+    entry = { repo, db, root };
+    repoPool.set(root, entry);
+  }
+  return entry.repo;
 }
 
 async function getCommitHash(dir) {
@@ -79,8 +102,9 @@ async function getCommitHash(dir) {
 async function getDirtyFiles(dir) {
   try {
     const { stdout } = await execFileAsync("git", ["status", "--porcelain"], { cwd: dir, windowsHide: true });
+    const lines = stdout.split(/\r?\n/);
     const files = [];
-    for (const line of stdout.split("\n")) {
+    for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed) continue;
       const filePath = trimmed.slice(2).trim();
@@ -97,9 +121,9 @@ function clampLine(content, line) {
   return Math.max(1, Math.min(line, Math.max(1, total)));
 }
 
-async function readWorkspaceFile(file) {
-  const r = ensureRepo();
-  const abs = assertInsideWorkspace(r.workspaceRoot, file);
+async function readWorkspaceFile(file, r) {
+  const repoInstance = r ?? ensureRepo();
+  const abs = assertInsideWorkspace(repoInstance.workspaceRoot, file);
   return fs.readFile(abs, "utf8");
 }
 
@@ -112,11 +136,11 @@ function slidingWindow(content, line) {
   return { lineStart: s + 1, lineEnd: e + 1, text: lines.slice(s, e + 1).join("\n") };
 }
 
-async function boundedSource(file, line, budget = 1500) {
+async function boundedSource(file, line, budget = 1500, r) {
   try {
-    const content = await readWorkspaceFile(file);
+    const content = await readWorkspaceFile(file, r);
     const clamped = clampLine(content, line);
-    const snippet = readNodeBody(file, content, clamped);
+    const snippet = await readNodeBody(file, content, clamped);
     let ls, le, text;
     if (snippet) ({ lineStart: ls, lineEnd: le, text } = snippet);
     else ({ lineStart: ls, lineEnd: le, text } = slidingWindow(content, clamped));
@@ -128,91 +152,87 @@ async function boundedSource(file, line, budget = 1500) {
 
 function diagnoseMissingSymbol(r, symbol, file, line) {
   if (file) {
-    const abs = path.isAbsolute(file) ? file : path.join(r.workspaceRoot, file);
-    if (!existsSync(abs)) {
-      return {
-        target_symbol: null,
-        stale_state: "FILE_NOT_FOUND",
-        error_code: "FILE_NOT_FOUND",
-        summary: `File does not exist on disk: ${file}. Tip: verify path or use codegraph_search_symbols to find files.`
-      };
+    const normalized = path.resolve(r.workspaceRoot, file);
+    if (!existsSync(normalized)) {
+      return `FILE_NOT_FOUND: The file "${file}" does not exist in workspace "${r.workspaceRoot}". Check the path or call codegraph_search_symbols to find where the symbol lives.`;
     }
-    const ext = path.extname(file).toLowerCase();
-    const nonAstExts = new Set([".md", ".markdown", ".txt", ".json", ".yaml", ".yml", ".png", ".jpg", ".svg", ".lock"]);
-    if (nonAstExts.has(ext)) {
-      return {
-        target_symbol: null,
-        stale_state: "NON_AST_LANGUAGE",
-        error_code: "NON_AST_LANGUAGE",
-        summary: `File "${file}" (${ext}) is not an AST-parsed source language. CodeGraph parses TypeScript, JavaScript, Rust, Python, Go, C++, etc.`
-      };
+    const lang = languageIdForFile(file);
+    if (!lang) {
+      return `NON_AST_LANGUAGE: The file "${file}" is not an AST-parseable source file (e.g. Markdown, JSON, configs). CodeGraph tracks structural code symbols.`;
+    }
+    const row = r.db.prepare("SELECT COUNT(*) AS c FROM code_nodes WHERE file = ? AND tombstoned = 0").get(file);
+    if (!row || row.c === 0) {
+      return `UNINDEXED: The file "${file}" is currently not indexed in graph.db. Run codegraph_index_workspace to index this file.`;
     }
   }
   if (symbol) {
-    const similar = r.searchSymbols(symbol.slice(0, Math.min(4, symbol.length)), undefined, 5);
-    const suggestions = similar.map((s) => `${s.name} (${s.file})`).join(", ");
-    return {
-      target_symbol: null,
-      stale_state: "SYMBOL_NOT_FOUND",
-      error_code: "SYMBOL_NOT_FOUND",
-      summary: `Symbol "${symbol}" was not found in indexed files.` + (suggestions ? ` Did you mean: ${suggestions}?` : " Try codegraph_search_symbols or run codegraph_index_workspace.")
-    };
+    const suggestions = r.db.prepare("SELECT name, kind, file, line_start FROM code_nodes WHERE tombstoned = 0 AND name LIKE ? LIMIT 5").all(`%${symbol}%`);
+    if (suggestions.length > 0) {
+      const formatted = suggestions.map((s) => `  - ${s.name} (${s.kind}) in ${s.file}:${s.line_start}`).join("\n");
+      return `SYMBOL_NOT_FOUND: Symbol "${symbol}" was not found${file ? ` in ${file}` : ""}. Did you mean one of these?\n${formatted}`;
+    }
   }
-  return {
-    target_symbol: null,
-    stale_state: "UNINDEXED",
-    error_code: "UNINDEXED",
-    summary: "CodeGraph has not indexed this target. Run codegraph_index_workspace first, then retry."
-  };
+  const stats = r.stats();
+  if (stats.indexedFiles === 0) {
+    return `UNINDEXED: The workspace "${r.workspaceRoot}" has 0 indexed files. Call codegraph_index_workspace first to build the structural code graph.`;
+  }
+  return `SYMBOL_NOT_FOUND: No symbol matching "${symbol || (file + ":" + line)}" was found in the indexed codebase (${stats.indexedFiles} files, ${stats.indexedNodes} nodes). Use codegraph_search_symbols to find available symbols.`;
 }
 
-function fallbackSummary(subgraph, source, hoveredFile) {
-  if (!subgraph.target) {
-    return "CodeGraph has not indexed this symbol yet. Call codegraph_index_workspace first, then retry.";
+function assertInsideWorkspace(root, file) {
+  const resolved = path.resolve(root, file);
+  const rel = path.relative(root, resolved);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error(`File escapes workspace: ${file}`);
   }
-  const t = subgraph.target;
-  const calls = subgraph.directional?.calls ?? [];
-  const calledBy = subgraph.directional?.called_by ?? [];
-
-  const callList = calls.length === 0
-    ? "no outgoing calls"
-    : `calls ${calls.slice(0, 3).map((e) => e.target_name).join(", ")}${calls.length > 3 ? ` (+${calls.length - 3} more)` : ""}`;
-  const callerList = calledBy.length === 0
-    ? ""
-    : `; called by ${calledBy.slice(0, 3).map((e) => e.source_name).join(", ")}${calledBy.length > 3 ? ` (+${calledBy.length - 3} more)` : ""}`;
-
-  const src = source ? ` Source was read from lines ${source.line_start}-${source.line_end}.` : "";
-  const stale = t.freshness === "STALE" ? `\nWarning: this context is stale${t.stale_reason ? ` (${t.stale_reason})` : ""}.` : "";
-  const where = hoveredFile && normalizeWorkspaceFile(root ?? workspaceRoot(), hoveredFile) === t.file
-    ? "locally in this file" : `in ${t.file}`;
-  return `${t.name} is a ${t.kind} defined ${where}; ${callList}${callerList}.${src}${stale}`;
+  return resolved;
 }
 
-function guidanceFor(subgraph) {
-  if (subgraph.freshness === "UNINDEXED") return "UNINDEXED: call codegraph_index_workspace first, then retry.";
-  if (subgraph.freshness === "STALE") {
-    return `STALE${subgraph.target?.stale_reason ? `: ${subgraph.target.stale_reason}` : ""} — hedge structural claims and prefer re-reading source.`;
+function fallbackSummary(sub, src, fileHint) {
+  const t = sub.target;
+  const calls = sub.directional?.calls ?? [];
+  const calledBy = sub.directional?.called_by ?? [];
+  const name = t.name ?? "Target";
+  const kind = t.kind ?? "symbol";
+  const file = t.file ?? fileHint ?? "file";
+  const line = t.line_start ? `:${t.line_start}` : "";
+
+  let s = `${name} is a ${kind} declared in ${file}${line}.`;
+  if (calls.length > 0) {
+    const list = calls.slice(0, 4).map((c) => c.target_name).join(", ");
+    s += ` It calls ${list}${calls.length > 4 ? ` and ${calls.length - 4} others` : ""}.`;
   }
-  const totalEdges = (subgraph.directional?.calls?.length ?? 0) + (subgraph.directional?.called_by?.length ?? 0);
-  if (totalEdges === 0) return "No verified edges yet — use bounded_source_excerpt for implementation detail only; do not invent callers/callees.";
-  return "Use calls and called_by for ALL structural claims (what calls what). Never state a relationship not in the graph.";
+  if (calledBy.length > 0) {
+    const list = calledBy.slice(0, 4).map((c) => c.source_name).join(", ");
+    s += ` It is called by ${list}${calledBy.length > 4 ? ` and ${calledBy.length - 4} others` : ""}.`;
+  }
+  if (t.stale_reason) s += ` Note: ${t.stale_reason}.`;
+  return s;
 }
 
-function formatExplainResult(result, format = "compact") {
-  if (!result || !result.target_symbol) {
-    return JSON.stringify(result, null, 2);
+function guidanceFor(sub) {
+  const t = sub.target;
+  const calls = sub.directional?.calls ?? [];
+  const calledBy = sub.directional?.called_by ?? [];
+  const g = [];
+  if (calledBy.length > 0) {
+    g.push(`Before modifying ${t.name}, check downstream impact on: ${calledBy.slice(0, 3).map((c) => c.source_name).join(", ")}`);
   }
+  if (calls.length > 0) {
+    g.push(`Relies on: ${calls.slice(0, 3).map((c) => c.target_name).join(", ")}`);
+  }
+  return g;
+}
+
+function formatExplainResult(result, format) {
   const sym = result.target_symbol;
-  const calls = result.calls ?? [];
-  const calledBy = result.called_by ?? [];
+  const calls = result.calls || [];
+  const calledBy = result.called_by || [];
 
   if (format === "mermaid") {
-    const lines = [
-      "```mermaid",
-      "graph LR",
-      `  classDef curr fill:#2563eb,color:#fff,stroke:#1d4ed8,stroke-width:2px;`,
-      `  CURR["${sym.name} (${sym.kind})"]:::curr`
-    ];
+    const lines = ["```mermaid", "graph TD"];
+    const currSafe = sym.name.replace(/[^a-zA-Z0-9_]/g, "_");
+    lines.push(`  CURR["${sym.name} (${sym.kind})"]:::current`);
     for (const c of calls.slice(0, 10)) {
       const safe = c.target_name.replace(/[^a-zA-Z0-9_]/g, "_");
       lines.push(`  CURR -->|calls| ${safe}["${c.target_name}"]`);
@@ -235,64 +255,62 @@ function formatExplainResult(result, format = "compact") {
       text += `  -> calls: ${calls.map((c) => c.target_name).join(", ")}\n`;
     }
     if (calledBy.length) {
-      text += `  <- called_by: ${calledBy.map((c) => `${c.source_name} (${c.source_file}:${c.line_start})`).join(", ")}\n`;
+      text += `  <- called by: ${calledBy.map((c) => c.source_name).join(", ")}\n`;
     }
     if (result.bounded_source_excerpt) {
-      text += `\n--- Source (${result.bounded_source_excerpt.line_start}-${result.bounded_source_excerpt.line_end}) ---\n${result.bounded_source_excerpt.text}\n`;
+      text += `\n[SOURCE EXCERPT]\n${result.bounded_source_excerpt.text}\n`;
     }
     text += `\nSummary: ${result.summary}`;
     return text;
   }
 
-  return JSON.stringify({
-    target_symbol: sym,
-    calls: calls.map((c) => ({ target_name: c.target_name, file: c.target_file, line: c.line_start, type: c.type })),
-    called_by: calledBy.map((c) => ({ source_name: c.source_name, file: c.source_file, line: c.line_start, type: c.type })),
-    stale_state: result.stale_state,
-    summary: result.summary,
-    usage_guidance: result.usage_guidance,
-    bounded_source_excerpt: result.bounded_source_excerpt
-  }, null, 2);
+  return result;
 }
 
-function formatSubgraphResult(sub, format = "compact") {
-  if (!sub || !sub.target) return JSON.stringify(sub, null, 2);
-  const t = sub.target;
-  const calls = sub.directional?.calls ?? [];
-  const calledBy = sub.directional?.called_by ?? [];
+function formatSubgraphResult(sub, format) {
+  const sym = sub.target;
+  const calls = sub.directional?.calls || [];
+  const calledBy = sub.directional?.called_by || [];
+
+  if (format === "compact") {
+    let text = `=== Subgraph for ${sym.name} (${sym.file}:${sym.line_start}) ===\n`;
+    text += `Outgoing calls (${calls.length}): ${calls.map((c) => c.target_name).join(", ") || "none"}\n`;
+    text += `Incoming callers (${calledBy.length}): ${calledBy.map((c) => c.source_name).join(", ") || "none"}\n`;
+    return text;
+  }
 
   if (format === "mermaid") {
-    const lines = ["```mermaid", "graph LR", `  CURR["${t.name} (${t.kind})"]`];
-    for (const c of calls.slice(0, 10)) {
+    const lines = ["```mermaid", "graph LR"];
+    const currSafe = sym.name.replace(/[^a-zA-Z0-9_]/g, "_");
+    for (const c of calls) {
       const safe = c.target_name.replace(/[^a-zA-Z0-9_]/g, "_");
-      lines.push(`  CURR -->|calls| ${safe}["${c.target_name}"]`);
+      lines.push(`  ${currSafe} --> ${safe}`);
     }
-    for (const cb of calledBy.slice(0, 10)) {
+    for (const cb of calledBy) {
       const safe = cb.source_name.replace(/[^a-zA-Z0-9_]/g, "_");
-      lines.push(`  ${safe}["${cb.source_name}"] -->|calls| CURR`);
+      lines.push(`  ${safe} --> ${currSafe}`);
     }
     lines.push("```");
     return lines.join("\n");
   }
 
-  if (format === "compact") {
-    let text = `Symbol: ${t.name} (${t.kind}) in ${t.file}:${t.line_start}-${t.line_end} [${t.freshness}]\n`;
-    if (calls.length) text += `  -> calls (${calls.length}): ${calls.map((c) => c.target_name).join(", ")}\n`;
-    if (calledBy.length) text += `  <- called_by (${calledBy.length}): ${calledBy.map((c) => c.source_name).join(", ")}\n`;
-    text += `Total nodes: ${sub.nodes.length}, verified edges: ${sub.edges.length}`;
-    return text;
-  }
-
-  return JSON.stringify(sub, null, 2);
+  return sub;
 }
 
-async function collectFiles(maxFiles, fileFilter = null) {
-  const r = ensureRepo();
-  if (fileFilter && fileFilter.length > 0) {
+const SKIP = new Set([
+  "node_modules", ".git", ".codegraph", ".duckgraph", "dist", "build", "out",
+  ".next", ".svelte-kit", "target", "vendor", "__pycache__", ".venv"
+]);
+
+async function collectFiles(maxFiles = 1000, fileFilter = null, r = ensureRepo()) {
+  if (fileFilter && Array.isArray(fileFilter)) {
     const results = [];
     for (const rel of fileFilter) {
-      const full = path.isAbsolute(rel) ? rel : path.join(r.workspaceRoot, rel);
-      if (existsSync(full) && languageIdForFile(full)) {
+      if (results.length >= maxFiles) break;
+      const full = path.resolve(r.workspaceRoot, rel);
+      if (languageIdForFile(full)) {
+        const stat = await fs.stat(full).catch(() => null);
+        if (!stat || stat.size > 1_000_000) continue;
         const content = await fs.readFile(full, "utf8").catch(() => null);
         if (content !== null) results.push({ file: full, content });
       }
@@ -324,8 +342,7 @@ async function collectFiles(maxFiles, fileFilter = null) {
   return results;
 }
 
-async function indexWorkspace(args) {
-  const r = ensureRepo();
+async function indexWorkspace(args, r = ensureRepo(args.workspace)) {
   const maxFiles = typeof args.max_files === "number" && args.max_files > 0 ? Math.min(5000, Math.floor(args.max_files)) : 1000;
   if (args.force_reindex === true) r.clearGraphCache();
 
@@ -337,11 +354,11 @@ async function indexWorkspace(args) {
     }
   }
 
-  const files = await collectFiles(maxFiles, fileFilter);
+  const files = await collectFiles(maxFiles, fileFilter, r);
   const commitHash = await getCommitHash(r.workspaceRoot);
   let nodes = 0, edges = 0;
   for (const f of files) {
-    const parsed = parseFile(f.file, f.content);
+    const parsed = await parseFile(f.file, f.content);
     if (!parsed || (parsed.nodes.length === 0 && f.content.trim().length > 0)) continue;
     try {
       const res = r.upsertFileIndex(f.file, parsed.nodes, parsed.edges, commitHash);
@@ -360,21 +377,25 @@ async function indexWorkspace(args) {
   };
 }
 
-function textResult(data) {
-  return { content: [{ type: "text", text: typeof data === "string" ? data : JSON.stringify(data) }] };
+const server = new Server(
+  { name: "codegraph", version: "0.3.0" },
+  { capabilities: { tools: {} } }
+);
+
+function num(val, fallback) {
+  return typeof val === "number" && !isNaN(val) ? val : fallback;
 }
 
 function symbolSchema() {
   return {
     type: "object",
     properties: {
-      symbol: { type: "string", description: "Symbol name (e.g. 'activate', 'createApp'). When provided, CodeGraph searches across workspace automatically." },
-      file: { type: "string", description: "Optional file path. Workspace-relative or absolute." },
-      line: { type: "integer", minimum: 1, description: "Optional 1-based line number." },
-      format: { type: "string", enum: ["compact", "mermaid", "json"], description: "Output format: 'compact' (token-saving text, default), 'mermaid' (diagram), or 'json' (clean JSON)." },
-      depth: { type: "integer", minimum: 0, maximum: 2, description: "Traversal depth 0-2, default 1." },
-      max_edges: { type: "integer", minimum: 1, maximum: 60, description: "Max edges, default 8." },
-      source_budget: { type: "integer", minimum: 1, maximum: 8000, description: "Max source excerpt chars, default 1500." }
+      symbol: { type: "string", description: "Symbol name to look up globally across the indexed codebase (e.g. 'createApp', 'CodeParser')." },
+      file: { type: "string", description: "Path to file inside workspace. Optional if symbol is specified." },
+      line: { type: "integer", minimum: 1, description: "1-based line number. Optional if symbol is specified." },
+      workspace: { type: "string", description: "Optional workspace root directory override." },
+      format: { type: "string", enum: ["compact", "mermaid", "json"], description: "Output format, default 'compact'." },
+      source_budget: { type: "integer", minimum: 100, maximum: 8000, description: "Max characters of source code to return, default 1500." }
     },
     additionalProperties: false
   };
@@ -383,48 +404,71 @@ function symbolSchema() {
 const primaryTools = [
   {
     name: "codegraph_overview",
-    description: "[Step 1 - Start Here] High-level architectural map of the codebase. Detects entrypoints (main, activate, createApp), degree-centrality hub symbols with the most callers/callees, languages, and index stats. Call this FIRST when exploring any unfamiliar codebase.",
+    description: "[Tier 1: Macro - Start Here] High-level architectural map of the codebase. Detects entrypoints (main, activate, createApp), degree-centrality hub symbols with the most callers/callees, languages, and index stats. Call this FIRST when exploring any unfamiliar codebase.",
     inputSchema: {
       type: "object",
       properties: {
-        top_n: { type: "integer", minimum: 1, maximum: 50, description: "Number of top hub symbols to return, default 10." }
+        workspace: { type: "string", description: "Optional workspace root directory override." },
+        top_n: { type: "integer", minimum: 1, maximum: 50, description: "Number of top hub symbols to return, default 10." },
+        format: { type: "string", enum: ["compact", "json"], description: "Output format, default 'compact'." }
       },
       additionalProperties: false
     }
   },
   {
     name: "codegraph_search_symbols",
-    description: "[Step 2 - Find Symbols] Fast search for symbol names across the entire workspace. Returns symbol names, kinds (function/class/interface), files, and line numbers. Use when you need to find where something is defined without knowing the file.",
+    description: "[Tier 3: Find Symbols] Fast degree-centrality ranked search for symbol names across the entire workspace. Returns symbol names, kinds (function/class/interface), files, and line numbers. Common keywords surface architectural hubs first.",
     inputSchema: {
       type: "object",
       properties: {
         query: { type: "string", description: "Substring or symbol name to search for." },
         kind: { type: "string", description: "Optional filter by kind ('function', 'class', 'interface', 'variable')." },
-        limit: { type: "integer", minimum: 1, maximum: 100, description: "Max results, default 20." }
+        workspace: { type: "string", description: "Optional workspace root directory override." },
+        limit: { type: "integer", minimum: 1, maximum: 100, description: "Max results, default 20." },
+        format: { type: "string", enum: ["compact", "json"], description: "Output format, default 'compact'." }
       },
       required: ["query"],
       additionalProperties: false
     }
   },
   {
+    name: "codegraph_context_slice",
+    description: "[Tier 2: Meso - Daily Driver / 1-Turn Answer] Returns the complete context cluster in 1 single turn: AST-bounded source of the target symbol + AST-bounded sources of its top callers and callees (just the functions, NOT entire files!) + blast radius impact summary + mini Mermaid diagram (~800-1200 tokens). Eliminates multi-turn tool calling.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        symbol: { type: "string", description: "Target symbol name to inspect." },
+        file: { type: "string", description: "Optional file path if symbol name is ambiguous." },
+        workspace: { type: "string", description: "Optional workspace root directory override." },
+        max_callees: { type: "integer", minimum: 1, maximum: 10, description: "Max direct dependencies (callees) to excerpt, default 3." },
+        max_callers: { type: "integer", minimum: 1, maximum: 10, description: "Max callers to excerpt, default 2." },
+        format: { type: "string", enum: ["compact", "mermaid", "json"], description: "Output format, default 'compact'." }
+      },
+      required: ["symbol"],
+      additionalProperties: false
+    }
+  },
+  {
     name: "codegraph_explain_symbol",
-    description: "[Step 3 - Understand Code] Deep symbol inspection. Returns verified calls (outgoing), callers (incoming), AST-bounded source excerpt, and grounded summary. Can be queried by symbol name alone, or file+line. Supports format='compact' (token-saving), 'mermaid' (diagram), or 'json'.",
+    description: "[Tier 3: Understand Code] Deep symbol inspection. Returns verified calls (outgoing), callers (incoming), AST-bounded source excerpt, and grounded summary. Can be queried by symbol name alone, or file+line. Supports format='compact' (token-saving), 'mermaid' (diagram), or 'json'.",
     inputSchema: symbolSchema()
   },
   {
     name: "codegraph_query_subgraph",
-    description: "[Step 3b - Relationship Graph] Return relationship graph for a symbol showing callers, callees, and type dependencies. Supports format='compact', 'mermaid', or 'json'.",
+    description: "[Tier 3: Relationship Graph] Return relationship graph for a symbol showing callers, callees, and type dependencies. Supports format='compact', 'mermaid', or 'json'.",
     inputSchema: symbolSchema()
   },
   {
     name: "codegraph_impact_analysis",
-    description: "[Step 4 - Pre-Edit Safety] Blast radius analysis. Traces all direct and indirect downstream dependents and callers up to N hops away. Run this BEFORE editing or refactoring a function to know what might break.",
+    description: "[Tier 3: Pre-Edit Safety] Blast radius analysis. Traces all direct and indirect downstream dependents and callers up to N hops away. Run this BEFORE editing or refactoring a function to know what might break.",
     inputSchema: {
       type: "object",
       properties: {
         symbol: { type: "string", description: "Symbol name to analyze (e.g. 'WorkspaceIndexer')." },
         file: { type: "string", description: "Optional file path if symbol is ambiguous." },
-        max_depth: { type: "integer", minimum: 1, maximum: 5, description: "Traversal depth, default 3." }
+        workspace: { type: "string", description: "Optional workspace root directory override." },
+        max_depth: { type: "integer", minimum: 1, maximum: 5, description: "Traversal depth, default 3." },
+        format: { type: "string", enum: ["compact", "json"], description: "Output format, default 'compact'." }
       },
       required: ["symbol"],
       additionalProperties: false
@@ -432,13 +476,15 @@ const primaryTools = [
   },
   {
     name: "codegraph_find_path",
-    description: "[Architecture Explorer] Shortest call-chain path connecting from_symbol to to_symbol. Explains how execution flows from one component to another (e.g., from 'activate' to 'createApp').",
+    description: "[Tier 1: Architecture Explorer] Shortest call-chain path connecting from_symbol to to_symbol. Explains how execution flows from one component to another (e.g., from 'activate' to 'createApp').",
     inputSchema: {
       type: "object",
       properties: {
         from_symbol: { type: "string", description: "Starting symbol name." },
         to_symbol: { type: "string", description: "Destination symbol name." },
-        max_depth: { type: "integer", minimum: 1, maximum: 8, description: "Maximum search hops, default 6." }
+        workspace: { type: "string", description: "Optional workspace root directory override." },
+        max_depth: { type: "integer", minimum: 1, maximum: 8, description: "Maximum search hops, default 6." },
+        format: { type: "string", enum: ["compact", "json"], description: "Output format, default 'compact'." }
       },
       required: ["from_symbol", "to_symbol"],
       additionalProperties: false
@@ -451,49 +497,91 @@ const primaryTools = [
   },
   {
     name: "codegraph_index_workspace",
-    description: "[Maintenance / Re-indexing] Index or update the code graph. Set dirty_only=true to quickly index only git-modified files after making code changes. force_reindex=true rebuilds from scratch.",
+    description: "Build or update the SQLite structural graph for the workspace using 100% pure Tree-Sitter WASM. Supports incremental indexing via dirty_only: true.",
     inputSchema: {
       type: "object",
       properties: {
-        max_files: { type: "integer", minimum: 1, maximum: 5000, description: "Max files to index, default 1000." },
-        force_reindex: { type: "boolean", description: "Set true to wipe graph and rebuild from scratch." },
-        dirty_only: { type: "boolean", description: "Set true to quickly index only git-modified/untracked files." }
+        workspace: { type: "string", description: "Optional workspace root directory override." },
+        force_reindex: { type: "boolean", description: "Wipe graph.db and re-index all files from scratch, default false." },
+        dirty_only: { type: "boolean", description: "Index only files modified in git (git status --porcelain), default false." },
+        max_files: { type: "integer", minimum: 1, maximum: 5000, description: "Max files to process, default 1000." }
       },
       additionalProperties: false
     }
   },
   {
     name: "codegraph_health",
-    description: "Diagnostic check. Returns ok, workspace_root, indexedFiles, indexedNodes, and dbPath.",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false }
+    description: "Check health of the CodeGraph database, indexed scope, and pooled workspaces.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspace: { type: "string", description: "Optional workspace root directory override." }
+      },
+      additionalProperties: false
+    }
   },
   {
     name: "codegraph_confirm_edge",
-    description: "Confirm an edge id from query/explain so future answers treat it as verified.",
-    inputSchema: { type: "object", properties: { edge_id: { type: "integer", minimum: 1 } }, required: ["edge_id"], additionalProperties: false }
+    description: "Human/agent feedback loop: confirm an inferred code edge as ground-truth verified.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        edge_id: { type: "integer", description: "ID of edge to confirm." },
+        workspace: { type: "string", description: "Optional workspace root directory override." }
+      },
+      required: ["edge_id"],
+      additionalProperties: false
+    }
   },
   {
     name: "codegraph_dismiss_edge",
-    description: "Dismiss an edge id so future answers exclude it.",
-    inputSchema: { type: "object", properties: { edge_id: { type: "integer", minimum: 1 } }, required: ["edge_id"], additionalProperties: false }
+    description: "Human/agent feedback loop: dismiss a false-positive inferred code edge.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        edge_id: { type: "integer", description: "ID of edge to dismiss." },
+        workspace: { type: "string", description: "Optional workspace root directory override." }
+      },
+      required: ["edge_id"],
+      additionalProperties: false
+    }
   }
 ];
 
-const tools = primaryTools;
+function tools() {
+  return primaryTools;
+}
 
-const server = new Server({ name: "codegraph", version: "0.2.0" }, { capabilities: { tools: {} } });
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: tools()
+}));
+
+function textResult(payload) {
+  const text = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+  return { content: [{ type: "text", text }] };
+}
+
 server.setRequestHandler(CallToolRequestSchema, async (msg) => {
+  const name = msg.params.name;
   const args = msg.params.arguments ?? {};
-  try {
-    const r = ensureRepo();
-    const num = (v, d) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : d);
-    const format = args.format || "compact";
+  const r = ensureRepo(args.workspace, args.file);
+  const format = args.format ?? "compact";
 
-    switch (msg.params.name) {
-      case "codegraph_health": {
-        const s = r.stats();
-        return textResult({ ok: true, workspace_root: r.workspaceRoot, indexedFiles: s.indexedFiles, indexedNodes: s.indexedNodes, dbPath: resolveDbPath(r.workspaceRoot) });
+  try {
+    switch (name) {
+      case "codegraph_health":
+      case "duckgraph_health": {
+        const stats = r.stats();
+        const edges = r.db.prepare("SELECT COUNT(*) AS c FROM code_edges WHERE dismissed = 0").get()?.c ?? 0;
+        return textResult({
+          ok: true,
+          workspace_root: r.workspaceRoot,
+          active_pooled_workspaces: repoPool.size,
+          indexedFiles: stats.indexedFiles,
+          indexedNodes: stats.indexedNodes,
+          totalEdges: edges,
+          dbPath: resolveDbPath(r.workspaceRoot)
+        });
       }
       case "codegraph_overview": {
         const overview = r.getOverview(num(args.top_n, 10));
@@ -510,7 +598,7 @@ server.setRequestHandler(CallToolRequestSchema, async (msg) => {
             text += `  - ${hub.name}() in ${hub.file}:${hub.line_start} (calls: ${hub.out_degree}, called_by: ${hub.in_degree})\n`;
           }
           text += `\nRecommended next steps:\n`;
-          text += `  1. Call codegraph_explain_symbol(symbol: "<name>") to inspect any hub or entrypoint.\n`;
+          text += `  1. Call codegraph_context_slice(symbol: "<name>") to inspect target + callers + callees in 1 turn.\n`;
           text += `  2. Call codegraph_search_symbols(query: "<name>") to search specific functions.\n`;
           return textResult(text);
         }
@@ -527,6 +615,118 @@ server.setRequestHandler(CallToolRequestSchema, async (msg) => {
           return textResult(text);
         }
         return textResult(matches);
+      }
+      case "codegraph_context_slice": {
+        const symbol = String(args.symbol || "");
+        const slice = r.getContextSlice(symbol, args.file, {
+          maxCallees: typeof args.max_callees === "number" ? args.max_callees : 3,
+          maxCallers: typeof args.max_callers === "number" ? args.max_callers : 2
+        });
+        if (!slice) {
+          return textResult(diagnoseMissingSymbol(r, symbol, args.file));
+        }
+
+        const targetSrc = await boundedSource(slice.target.file, slice.target.line_start, 1500, r);
+
+        const calleeExcerpts = [];
+        for (const callee of slice.callees) {
+          const src = await boundedSource(callee.file, callee.line_start, 800, r);
+          if (src) {
+            calleeExcerpts.push({
+              name: callee.name,
+              kind: callee.kind,
+              file: callee.file,
+              lines: `${src.line_start}-${src.line_end}`,
+              text: src.text
+            });
+          }
+        }
+
+        const callerExcerpts = [];
+        for (const caller of slice.callers) {
+          const src = await boundedSource(caller.file, caller.line_start, 800, r);
+          if (src) {
+            callerExcerpts.push({
+              name: caller.name,
+              kind: caller.kind,
+              file: caller.file,
+              lines: `${src.line_start}-${src.line_end}`,
+              text: src.text
+            });
+          }
+        }
+
+        if (format === "json") {
+          return textResult({
+            target: slice.target,
+            target_source: targetSrc,
+            callees: calleeExcerpts,
+            callers: callerExcerpts,
+            blast_radius_count: slice.blast_radius_count,
+            has_test_coverage: slice.has_test_coverage,
+            test_callers_count: slice.test_callers_count
+          });
+        }
+
+        if (format === "mermaid") {
+          const lines = ["graph TD"];
+          const targetSafe = slice.target.name.replace(/[^a-zA-Z0-9_]/g, "_");
+          lines.push(`  ${targetSafe}["${slice.target.name} (${slice.target.kind})"]:::target`);
+          for (const caller of slice.callers) {
+            const callerSafe = caller.name.replace(/[^a-zA-Z0-9_]/g, "_");
+            lines.push(`  ${callerSafe}["${caller.name}"] -->|calls| ${targetSafe}`);
+          }
+          for (const callee of slice.callees) {
+            const calleeSafe = callee.name.replace(/[^a-zA-Z0-9_]/g, "_");
+            lines.push(`  ${targetSafe} -->|calls| ${calleeSafe}["${callee.name}"]`);
+          }
+          lines.push("  classDef target fill:#4a90e2,stroke:#2a5082,stroke-width:2px,color:#fff;");
+          const mermaidChart = "```mermaid\n" + lines.join("\n") + "\n```";
+
+          let out = `### 1-Turn Context Slice: \`${slice.target.name}\`\n\n${mermaidChart}\n\n`;
+          out += `#### Target Source (\`${slice.target.file}:${targetSrc?.line_start}-${targetSrc?.line_end}\`)\n\`\`\`\n${targetSrc?.text ?? "(no source)"}\n\`\`\`\n\n`;
+          if (calleeExcerpts.length) {
+            out += `#### Direct Dependencies (${calleeExcerpts.length})\n`;
+            for (const c of calleeExcerpts) {
+              out += `**\`${c.name}\`** [${c.kind}] (\`${c.file}:${c.lines}\`):\n\`\`\`\n${c.text}\n\`\`\`\n\n`;
+            }
+          }
+          if (callerExcerpts.length) {
+            out += `#### Callers (${callerExcerpts.length})\n`;
+            for (const c of callerExcerpts) {
+              out += `**\`${c.name}\`** [${c.kind}] (\`${c.file}:${c.lines}\`):\n\`\`\`\n${c.text}\n\`\`\`\n\n`;
+            }
+          }
+          out += `> **Blast Radius**: ${slice.blast_radius_count} downstream dependents | **Tests**: ${slice.has_test_coverage ? `YES (${slice.test_callers_count} test suites)` : "None detected"}`;
+          return textResult(out);
+        }
+
+        // Default "compact"
+        let out = `=== Context Slice: ${slice.target.name}() [${slice.target.kind}] ${slice.target.file}:${targetSrc?.line_start ?? slice.target.line_start}-${targetSrc?.line_end ?? slice.target.line_end} ===\n`;
+        out += `\n[TARGET SOURCE]\n${targetSrc?.text ?? "(source unavailable)"}\n`;
+
+        if (calleeExcerpts.length > 0) {
+          out += `\n--- Direct Dependencies (${calleeExcerpts.length}) ---\n`;
+          for (const c of calleeExcerpts) {
+            out += `-> calls ${c.name} [${c.kind}] (${c.file}:${c.lines}):\n${c.text}\n\n`;
+          }
+        } else {
+          out += `\n--- Direct Dependencies: None ---\n`;
+        }
+
+        if (callerExcerpts.length > 0) {
+          out += `--- Immediate Callers (${callerExcerpts.length}) ---\n`;
+          for (const c of callerExcerpts) {
+            out += `<- called by ${c.name} [${c.kind}] (${c.file}:${c.lines}):\n${c.text}\n\n`;
+          }
+        } else {
+          out += `--- Immediate Callers: None detected ---\n`;
+        }
+
+        out += `--- Blast Radius & Safety ---\n`;
+        out += `Downstream dependents: ${slice.blast_radius_count} | Test coverage: ${slice.has_test_coverage ? `YES (${slice.test_callers_count} test suites)` : "WARNING: 0 test suites detected within 2 hops"}\n`;
+
+        return textResult(out.trim());
       }
       case "codegraph_impact_analysis": {
         const impact = r.getImpactAnalysis(String(args.symbol), args.file, num(args.max_depth, 3));
@@ -563,7 +763,7 @@ server.setRequestHandler(CallToolRequestSchema, async (msg) => {
       }
       case "codegraph_index_workspace":
       case "duckgraph_index_workspace":
-        return textResult(await indexWorkspace(args));
+        return textResult(await indexWorkspace(args, r));
       case "codegraph_query_subgraph":
       case "duckgraph_query_subgraph": {
         const line = args.line ? num(args.line, 1) : undefined;
@@ -581,7 +781,7 @@ server.setRequestHandler(CallToolRequestSchema, async (msg) => {
           return textResult(diagnoseMissingSymbol(r, args.symbol, args.file, args.line));
         }
         const t = sub.target;
-        const src = await boundedSource(t.file, t.line_start, num(args.source_budget, 1500));
+        const src = await boundedSource(t.file, t.line_start, num(args.source_budget, 1500), r);
         return textResult({
           target_symbol: { name: t.name, kind: t.kind, file: t.file, line_start: t.line_start, line_end: t.line_end, freshness: t.freshness, stale_reason: t.stale_reason },
           bounded_source_excerpt: src,
@@ -596,7 +796,7 @@ server.setRequestHandler(CallToolRequestSchema, async (msg) => {
           return textResult(diagnoseMissingSymbol(r, args.symbol, args.file, args.line));
         }
         const t = sub.target;
-        const src = await boundedSource(t.file, t.line_start, num(args.source_budget, 1500));
+        const src = await boundedSource(t.file, t.line_start, num(args.source_budget, 1500), r);
         const summary = fallbackSummary(sub, src, args.file);
         const guidance = guidanceFor(sub);
         const result = {

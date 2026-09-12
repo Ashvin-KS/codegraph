@@ -113,6 +113,7 @@ async function smoke() {
     for (const expected of [
       "codegraph_overview",
       "codegraph_search_symbols",
+      "codegraph_context_slice",
       "codegraph_index_workspace",
       "codegraph_query_subgraph",
       "codegraph_impact_analysis",
@@ -153,6 +154,16 @@ async function smoke() {
     const searchText = search.result?.content?.[0]?.text ?? "";
     if (!searchText.includes("total")) fail(`search_symbols missing total: ${searchText}`);
     else ok("search_symbols");
+
+    const slice = await send(61, "tools/call", { name: "codegraph_context_slice", arguments: { symbol: "total" } });
+    const sliceText = slice.result?.content?.[0]?.text ?? "";
+    if (!sliceText.includes("Context Slice") && !sliceText.includes("total")) fail(`context_slice missing total: ${sliceText}`);
+    else ok("context_slice (1-turn composite)");
+
+    const healthDyn = await send(62, "tools/call", { name: "codegraph_health", arguments: { workspace: tmp } });
+    const healthDynText = healthDyn.result?.content?.[0]?.text ?? "";
+    if (!healthDynText.includes("active_pooled_workspaces")) fail(`health dynamic workspace unexpected: ${healthDynText}`);
+    else ok("dynamic workspace routing");
 
     const explained = await send(7, "tools/call", {
       name: "codegraph_explain_symbol",

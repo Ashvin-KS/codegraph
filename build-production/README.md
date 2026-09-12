@@ -176,8 +176,12 @@ flowchart TB
 
 ---
 
-## Key fixes in 0.2.0
+## Key features in 0.3.0
 
+- **100% Pure Tree-Sitter WASM Engine**: Complete eradication of regex fallback parsing across both daemon and standalone MCP. True compiler-grade AST parsing with zero native C++ compiler toolchains required.
+- **1-Turn Composite Tool (`codegraph_context_slice`)**: Delivers single-turn answer speed without context pollution. Returns target symbol AST + top callers' ASTs + top callees' ASTs + blast radius + micro Mermaid diagram in ~800–1,200 tokens.
+- **Dynamic Multi-Workspace Auto-Discovery & Connection Pool**: Standalone MCP can query any folder or file without restarting. Automatically walks up the directory tree to find `.codegraph/` or `.git/` and pools open databases in memory.
+- **Degree-Centrality Ranked Search**: Symbol searches are weighted by network degree so architectural hubs surface before minor variables.
 - **Stable re-index**: node keys are `file + kind + name` (never line numbers). Line shifts update silently without a new tree, without touching `updated_at`, without spurious `STALE`. Duplicate symbols get deterministic `#2` suffixes. Empty parses no longer wipe the graph. `orbit` ordering is stable (`file, name`).
 - **Branch-safe**: git watcher resolves worktree `.git` files, diffs `HEAD@{1}..HEAD` with merge-aware fallback, and stale line numbers are clamped instead of `400`. Files escaping the workspace are rejected.
 - **MCP that works**: lockfile discovery checks `--workspace` / `CODEGRAPH_WORKSPACE`, workspace `.codegraph/` + `.duckgraph/`, and all publisher `globalStorage` roots; 30s timeouts with actionable errors; `integer` schemas with descriptions; `codegraph_health` tool; `explain` returns `summary` + `usage_guidance` so Claude needs no llama.cpp.
@@ -193,7 +197,7 @@ flowchart TB
   - `packages/kilo-vscode/` — VS Code extension, settings tab, config watchers.
   - `packages/opencode/` — agent prompt mappings and tool registrations.
 - `mcp/duckgraph-mcp/` — daemon-backed stdio MCP wrapper (needs the extension running).
-- `build-production/` — **independent** standalone MCP server (no daemon, no VS Code, no `kilocode/`).
+- `build-production/` — **independent** standalone MCP server (pure Tree-Sitter WASM, no daemon, no VS Code, no `kilocode/`).
 
 ---
 
@@ -215,49 +219,48 @@ Env: `CODEGRAPH_WORKSPACE`, `CODEGRAPH_LOCKFILE`, `CODEGRAPH_DB`, `CODEGRAPH_GLO
 
 ---
 
-## Agent Playbook: Recommended Tool Execution Order
+## Agent Playbook: The 3-Tier Execution Order
 
-When exploring an unfamiliar codebase, AI agents should follow this step-by-step workflow:
+AI agents should organize exploration into three tiers:
 
-### Step 1: Orientation & Architecture Discovery (Start Here)
-- **`codegraph_overview`**: Call this FIRST. Returns detected entrypoints (`main`, `activate`, `createApp`), degree-centrality hub symbols with the most callers/callees, languages, and index stats.
+### Tier 1: Macro (Architecture & Map)
+- **`codegraph_overview`**: Call this FIRST in unfamiliar workspaces. Returns entrypoints (`main`, `activate`, `createApp`), centrality hubs, and language statistics.
+- **`codegraph_find_path`**: Trace execution flow between any two symbols (`from_symbol` -> `to_symbol`).
 
-### Step 2: Search & Symbol Discovery
-- **`codegraph_search_symbols`**: Fast substring search across the workspace. Returns symbol names, kinds (`function`, `class`, `interface`), files, and line numbers. Use when locating a function without knowing its file path.
+### Tier 2: Meso (Daily Driver — 1-Turn Context Ingestion)
+- **`codegraph_context_slice`**: **The default tool for answering coding questions in 1 turn.** Returns:
+  1. Target function's AST-bounded source.
+  2. Top 2–3 callers and callees (just the functions, NOT entire files!).
+  3. Blast radius summary & test coverage detection.
+  4. Micro Mermaid diagram.
+  Total payload: ~800–1,200 tokens (vs. Colby's 10,000–30,000 tokens for full files).
 
-### Step 3: Deep Symbol Inspection
-- **`codegraph_explain_symbol`**: Deep inspection of any symbol. Returns verified call relationships, callers, AST-bounded source excerpt, and grounded summary. Can be queried by symbol name alone (searches workspace automatically) or file+line.
-  - Supports `format: "compact"` (token-saving default), `format: "mermaid"` (diagram), or `format: "json"`.
+### Tier 3: Micro (Surgical Surgery & Pre-Edit Safety)
+- **`codegraph_search_symbols`**: Fast degree-centrality ranked search across the workspace.
+- **`codegraph_impact_analysis`**: Blast radius recursive CTE tracing all downstream dependents up to $N$ hops away. Run BEFORE editing a symbol.
+- **`codegraph_explain_symbol`**: Deep inspection with verified call relationships, callers, AST excerpt, and grounded summary.
 - **`codegraph_query_subgraph`**: Relationship subgraph showing callers, callees, and type dependencies.
 - **`codegraph_read_source_node`**: Extract AST-bounded code window for a symbol.
-
-### Step 4: Architectural Tracing & Call Paths
-- **`codegraph_find_path`**: Find the shortest call-chain between two symbols (`from_symbol` -> `to_symbol`). Traces how execution flows from entrypoints down to utilities.
-
-### Step 5: Pre-Edit Safety & Impact Analysis
-- **`codegraph_impact_analysis`**: Blast radius analysis. Traces all direct and indirect downstream callers/dependents up to $N$ hops away. Run this BEFORE editing or refactoring a symbol to know what might break.
-
-### Step 6: Maintenance & Incremental Updates
-- **`codegraph_index_workspace`**: Re-index the codebase. Set `dirty_only: true` after editing files to re-index only git-modified files in milliseconds.
-- **`codegraph_health`**: Check database connection and index stats.
+- **`codegraph_confirm_edge`** / **`codegraph_dismiss_edge`**: Curate inferred edges.
 
 ---
 
-## MCP Tools Reference
+## MCP Tools Reference (12 Tools)
 
 Primary tools (`codegraph_*`; legacy `duckgraph_*` aliases supported):
 
 1. **`codegraph_overview`** — High-level architectural map with entrypoints, centrality hubs, and language distribution.
-2. **`codegraph_search_symbols`** — Substring search across all indexed symbols with kinds, files, and lines.
-3. **`codegraph_explain_symbol`** — Grounded symbol explanation with callers/callees and bounded source excerpt (`compact`, `mermaid`, or `json`).
-4. **`codegraph_query_subgraph`** — Bounded relationship graph for a symbol.
-5. **`codegraph_impact_analysis`** — Blast radius analysis showing all downstream dependents/callers up to $N$ hops away.
-6. **`codegraph_find_path`** — Shortest call chain between two symbols.
-7. **`codegraph_read_source_node`** — AST-bounded source excerpt for a symbol.
-8. **`codegraph_index_workspace`** — Index or re-index the workspace (`dirty_only: true` for fast incremental git updates).
-9. **`codegraph_health`** — Index stats, db path, and health status.
-10. **`codegraph_confirm_edge`** — Confirm an inferred edge.
-11. **`codegraph_dismiss_edge`** — Reject an inferred edge.
+2. **`codegraph_search_symbols`** — Degree-centrality ranked search across all indexed symbols with kinds, files, and lines.
+3. **`codegraph_context_slice`** — [NEW] 1-Turn composite context slice (target + callers + callees + blast radius in ~1,000 tokens).
+4. **`codegraph_explain_symbol`** — Grounded symbol explanation with callers/callees and bounded source excerpt (`compact`, `mermaid`, or `json`).
+5. **`codegraph_query_subgraph`** — Bounded relationship graph for a symbol.
+6. **`codegraph_impact_analysis`** — Blast radius analysis showing all downstream dependents/callers up to $N$ hops away.
+7. **`codegraph_find_path`** — Shortest call chain between two symbols.
+8. **`codegraph_read_source_node`** — AST-bounded source excerpt for a symbol.
+9. **`codegraph_index_workspace`** — Index or re-index the workspace with pure Tree-Sitter WASM (`dirty_only: true` for fast git updates).
+10. **`codegraph_health`** — Index stats, db path, and active pooled workspaces.
+11. **`codegraph_confirm_edge`** — Confirm an inferred edge.
+12. **`codegraph_dismiss_edge`** — Reject an inferred edge.
 
 ---
 

@@ -2,7 +2,7 @@
   "name": "codegraph",
   "displayName": "CodeGraph",
   "description": "Local-first VS Code codebase graph, hover memory, and grounded explanations. (Formerly DuckGraph; duckgraph.* commands and settings still work.)",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "kilocode-x",
   "license": "MIT",
   "private": false,

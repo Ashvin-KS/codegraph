@@ -209,6 +209,31 @@ export function total(values: number[]): number {
     expect(pathRes.depth).toBe(3);
     expect(pathRes.path).toEqual(["activate", "startServer", "handleRequest", "authenticate"]);
 
+    // 6. getContextSlice (1-turn composite cluster)
+    const slice = repository.getContextSlice("startServer");
+    expect(slice).not.toBeNull();
+    expect(slice?.target.name).toBe("startServer");
+    expect(slice?.callees.map((c) => c.name)).toContain("handleRequest");
+    expect(slice?.callers.map((c) => c.name)).toContain("activate");
+    expect(slice?.blast_radius_count).toBe(1); // activate -> startServer
+
+    // 7. Centrality-ranked search: symbols with more callers/callees rank higher
+    // Insert low-degree auth helper and high-degree auth hub
+    db.prepare(`
+      INSERT INTO code_nodes(id, stable_key, name, kind, file, line_start, line_end, commit_hash)
+      VALUES (5, 'k5', 'authHelper', 'function', 'src/auth.ts', 40, 45, 'c1'),
+             (6, 'k6', 'authService', 'class', 'src/auth.ts', 50, 100, 'c1')
+    `).run();
+    // authService has 2 incoming edges
+    db.prepare(`
+      INSERT INTO code_edges(from_id, to_id, type, confidence, dismissed, file_context)
+      VALUES (1, 6, 'calls', 'syntactic', 0, 'src/extension.ts'),
+             (2, 6, 'calls', 'syntactic', 0, 'src/server.ts')
+    `).run();
+    const ranked = repository.searchSymbols("auth");
+    // authService (degree 2) and authenticate (degree 1) should rank before authHelper (degree 0)
+    expect(ranked[0]?.name).toBe("authService");
+
     db.close();
   });
 });

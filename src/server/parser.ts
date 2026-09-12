@@ -95,18 +95,14 @@ export class CodeParser {
     }
 
     try {
-      const parsed = await this.parseWithTreeSitter(language, content);
-      if (parsed.nodes.length > 0) {
-        return parsed;
-      }
+      return await this.parseWithTreeSitter(language, content);
     } catch (error) {
-      this.logger.warn("tree-sitter parse failed; using fallback parser", {
+      this.logger.warn("tree-sitter parse failed", {
         file,
         error: error instanceof Error ? error.message : String(error)
       });
+      return { language, nodes: [], edges: [] };
     }
-
-    return parseWithRegex(language, content);
   }
 
   public async readNodeBody(file: string, content: string, line: number): Promise<{ text: string; lineStart: number; lineEnd: number } | null> {
@@ -260,182 +256,6 @@ function signatureForText(text: string): string {
     return first;
   }
   return `${first.slice(0, 177)}...`;
-}
-
-function parseWithRegex(language: SupportedLanguageId, content: string): ParsedFile {
-  const lines = content.split(/\r?\n/);
-  const starts: Array<{ index: number; name: string; kind: string; indent: number }> = [];
-  const patterns: Partial<Record<SupportedLanguageId, Array<{ kind: string; regex: RegExp }>>> = {
-    rust: [
-      { kind: "function", regex: /^\s*(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\b/ },
-      { kind: "struct", regex: /^\s*(?:pub\s+)?struct\s+([A-Za-z_][A-Za-z0-9_]*)\b/ },
-      { kind: "enum", regex: /^\s*(?:pub\s+)?enum\s+([A-Za-z_][A-Za-z0-9_]*)\b/ },
-      { kind: "interface", regex: /^\s*(?:pub\s+)?trait\s+([A-Za-z_][A-Za-z0-9_]*)\b/ },
-      { kind: "module", regex: /^\s*(?:pub\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\b/ }
-    ],
-    typescript: [
-      { kind: "function", regex: /^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\b/ },
-      { kind: "function", regex: /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*[^{=]+)?\s*=\s*(?:async\s*)?(?:\(.*?\)|[A-Za-z_$][\w$]*)\s*(?::\s*[^{=>]+)?\s*=>/ },
-      { kind: "class", regex: /^\s*(?:export\s+)?class\s+([A-Za-z_$][\w$]*)\b/ },
-      { kind: "interface", regex: /^\s*(?:export\s+)?interface\s+([A-Za-z_$][\w$]*)\b/ },
-      { kind: "type", regex: /^\s*(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\b/ },
-      { kind: "function", regex: /^\s*export\s+(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*[^{=]+)?\s*=\s*/ },
-      { kind: "function", regex: /^\s*(?:const|let|var)\s+(use[A-Za-z0-9_$]*|[A-Z][A-Za-z0-9_$]*)\s*(?::\s*[^{=]+)?\s*=\s*/ }
-    ],
-    typescriptreact: [
-      { kind: "function", regex: /^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\b/ },
-      { kind: "function", regex: /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*[^{=]+)?\s*=\s*(?:async\s*)?(?:\(.*?\)|[A-Za-z_$][\w$]*)\s*(?::\s*[^{=>]+)?\s*=>/ },
-      { kind: "class", regex: /^\s*(?:export\s+)?class\s+([A-Za-z_$][\w$]*)\b/ },
-      { kind: "interface", regex: /^\s*(?:export\s+)?interface\s+([A-Za-z_$][\w$]*)\b/ },
-      { kind: "type", regex: /^\s*(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\b/ },
-      { kind: "function", regex: /^\s*export\s+(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*[^{=]+)?\s*=\s*/ },
-      { kind: "function", regex: /^\s*(?:const|let|var)\s+(use[A-Za-z0-9_$]*|[A-Z][A-Za-z0-9_$]*)\s*(?::\s*[^{=]+)?\s*=\s*/ }
-    ],
-    python: [
-      { kind: "function", regex: /^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\b/ },
-      { kind: "class", regex: /^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)\b/ }
-    ],
-    go: [
-      { kind: "function", regex: /^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)\b/ },
-      { kind: "type", regex: /^\s*type\s+([A-Za-z_][A-Za-z0-9_]*)\b/ }
-    ],
-    c: [
-      { kind: "function", regex: /^\s*(?:static\s+)?(?:[\w\*]+\s+)+([A-Za-z_][A-Za-z0-9_]*)\s*\(/ },
-      { kind: "struct", regex: /^\s*(?:typedef\s+)?struct\s+([A-Za-z_][A-Za-z0-9_]*)\b/ }
-    ],
-    cpp: [
-      { kind: "function", regex: /^\s*(?:[\w:<>\*&,]+\s+)+([A-Za-z_][A-Za-z0-9_:]*)\s*\(/ },
-      { kind: "class", regex: /^\s*(?:class|struct)\s+([A-Za-z_][A-Za-z0-9_]*)\b/ }
-    ],
-    csharp: [
-      { kind: "function", regex: /^\s*(?:public|private|protected|internal|static|async|virtual|override|\s)+\s+[\w<>\[\],\s]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/ },
-      { kind: "class", regex: /^\s*(?:public|private|protected|internal|sealed|abstract|static|\s)*\s*(?:class|struct|interface|enum)\s+([A-Za-z_][A-Za-z0-9_]*)\b/ }
-    ],
-    java: [
-      { kind: "function", regex: /^\s*(?:public|private|protected|static|final|synchronized|abstract|\s)+\s+[\w<>\[\]]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/ },
-      { kind: "class", regex: /^\s*(?:public|private|protected|abstract|final|\s)*\s*(?:class|interface|enum)\s+([A-Za-z_][A-Za-z0-9_]*)\b/ }
-    ],
-    ruby: [
-      { kind: "function", regex: /^\s*def\s+([A-Za-z_][A-Za-z0-9_?!]*)\b/ },
-      { kind: "class", regex: /^\s*(?:class|module)\s+([A-Za-z_][A-Za-z0-9_:]*)\b/ }
-    ],
-    php: [
-      { kind: "function", regex: /^\s*(?:public|private|protected|static|\s)*function\s+([A-Za-z_][A-Za-z0-9_]*)\b/ },
-      { kind: "class", regex: /^\s*(?:abstract|final|\s)*\s*(?:class|interface|trait)\s+([A-Za-z_][A-Za-z0-9_]*)\b/ }
-    ],
-    zig: [{ kind: "function", regex: /^\s*(?:pub\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\b/ }],
-    bash: [{ kind: "function", regex: /^\s*(?:function\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(\))?\s*\{/ }],
-    html: [],
-    css: [],
-    json: [],
-    kotlin: [
-      { kind: "function", regex: /^\s*(?:suspend\s+)?fun\s+(?:<[^>]+>\s*)?([A-Za-z_][A-Za-z0-9_]*)\b/ },
-      { kind: "class", regex: /^\s*(?:data|sealed|open|abstract|\s)*\s*(?:class|object|interface)\s+([A-Za-z_][A-Za-z0-9_]*)\b/ }
-    ],
-    lua: [{ kind: "function", regex: /^\s*(?:local\s+)?function\s+([A-Za-z_][A-Za-z0-9_.:]*)\b/ }],
-    solidity: [
-      { kind: "function", regex: /^\s*function\s+([A-Za-z_][A-Za-z0-9_]*)\b/ },
-      { kind: "class", regex: /^\s*(?:contract|interface|library|struct)\s+([A-Za-z_][A-Za-z0-9_]*)\b/ }
-    ],
-    swift: [
-      { kind: "function", regex: /^\s*func\s+([A-Za-z_][A-Za-z0-9_]*)\b/ },
-      { kind: "class", regex: /^\s*(?:class|struct|enum|protocol)\s+([A-Za-z_][A-Za-z0-9_]*)\b/ }
-    ],
-    yaml: []
-  };
-
-  const list = patterns[language] ?? [];
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index] ?? "";
-    for (const pattern of list) {
-      const match = pattern.regex.exec(line);
-      if (match?.[1]) {
-        starts.push({
-          index,
-          name: match[1],
-          kind: pattern.kind,
-          indent: line.length - line.trimStart().length
-        });
-        break;
-      }
-    }
-  }
-
-  const nodes = starts.map((start2, order) => {
-    const next = starts[order + 1];
-    const maxEndIndex = next ? next.index - 1 : lines.length - 1;
-    const lineEnd = findBlockEnd(lines, start2.index, start2.indent, language, maxEndIndex);
-    const body2 = lines.slice(start2.index, lineEnd + 1).join("\n").replace(/\r\n/g, "\n").trimEnd();
-    return {
-      name: start2.name,
-      kind: start2.kind,
-      lineStart: start2.index + 1,
-      lineEnd: lineEnd + 1,
-      signature: signatureForText(lines[start2.index] ?? ""),
-      bodyHash: bodyHashForText(body2),
-      body: body2
-    };
-  });
-
-  return {
-    language,
-    nodes,
-    edges: inferEdges(nodes)
-  };
-}
-
-function findBlockEnd(lines: string[], startIndex: number, indent: number, language: SupportedLanguageId, maxEndIndex: number = lines.length - 1): number {
-  if (language === "python") {
-    for (let index = startIndex + 1; index <= maxEndIndex; index += 1) {
-      const line = lines[index] ?? "";
-      if (line.trim().length > 0 && line.length - line.trimStart().length <= indent) {
-        return Math.max(startIndex, index - 1);
-      }
-    }
-    return maxEndIndex;
-  }
-  let depth = 0;
-  let sawBrace = false;
-  for (let index = startIndex; index <= maxEndIndex; index += 1) {
-    const text = stripStringsAndComments(lines[index] ?? "");
-    for (const char of text) {
-      if (char === "{") {
-        depth += 1;
-        sawBrace = true;
-      } else if (char === "}") {
-        depth -= 1;
-      }
-    }
-    if (sawBrace && depth <= 0) {
-      return index;
-    }
-  }
-  return maxEndIndex;
-}
-
-function stripStringsAndComments(line: string): string {
-  let out = "";
-  let quote: string | null = null;
-  for (let i = 0; i < line.length; i += 1) {
-    const c = line[i];
-    const next = line[i + 1];
-    if (quote) {
-      if (c === "\\") {
-        i += 1;
-        continue;
-      }
-      if (c === quote) quote = null;
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      quote = c;
-      continue;
-    }
-    if (c === "/" && next === "/") break;
-    if (c === "#") break;
-    out += c;
-  }
-  return out;
 }
 
 const CALL_KEYWORDS = new Set([

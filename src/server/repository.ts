@@ -641,10 +641,12 @@ export class GraphRepository {
       return this.db
         .prepare(
           `
-          SELECT id, name, kind, file, line_start, line_end, signature
-          FROM code_nodes
-          WHERE tombstoned = 0 AND kind = ? AND name LIKE ?
-          ORDER BY (name = ?) DESC, LENGTH(name) ASC, file ASC
+          SELECT n.id, n.name, n.kind, n.file, n.line_start, n.line_end, n.signature,
+            ((SELECT COUNT(*) FROM code_edges WHERE to_id = n.id AND dismissed = 0) +
+             (SELECT COUNT(*) FROM code_edges WHERE from_id = n.id AND dismissed = 0)) AS total_degree
+          FROM code_nodes n
+          WHERE n.tombstoned = 0 AND n.kind = ? AND n.name LIKE ?
+          ORDER BY (n.name = ?) DESC, total_degree DESC, LENGTH(n.name) ASC, n.file ASC
           LIMIT ?
           `
         )
@@ -653,14 +655,96 @@ export class GraphRepository {
     return this.db
       .prepare(
         `
-        SELECT id, name, kind, file, line_start, line_end, signature
-        FROM code_nodes
-        WHERE tombstoned = 0 AND name LIKE ?
-        ORDER BY (name = ?) DESC, LENGTH(name) ASC, file ASC
+        SELECT n.id, n.name, n.kind, n.file, n.line_start, n.line_end, n.signature,
+          ((SELECT COUNT(*) FROM code_edges WHERE to_id = n.id AND dismissed = 0) +
+           (SELECT COUNT(*) FROM code_edges WHERE from_id = n.id AND dismissed = 0)) AS total_degree
+        FROM code_nodes n
+        WHERE n.tombstoned = 0 AND n.name LIKE ?
+        ORDER BY (n.name = ?) DESC, total_degree DESC, LENGTH(n.name) ASC, n.file ASC
         LIMIT ?
         `
       )
       .all(`%${query}%`, query, cleanLimit) as Array<{ id: number; name: string; kind: string; file: string; line_start: number; line_end: number; signature: string | null }>;
+  }
+
+  public getContextSlice(symbolName: string, file?: string, options: { maxCallees?: number; maxCallers?: number } = {}): {
+    target: GraphNodeDto;
+    callees: Array<{ id: number; name: string; kind: string; file: string; line_start: number; line_end: number; signature: string | null; type: string }>;
+    callers: Array<{ id: number; name: string; kind: string; file: string; line_start: number; line_end: number; signature: string | null; type: string }>;
+    blast_radius_count: number;
+    has_test_coverage: boolean;
+    test_callers_count: number;
+  } | null {
+    const maxCallees = Math.min(Math.max(1, options.maxCallees ?? 3), 10);
+    const maxCallers = Math.min(Math.max(1, options.maxCallers ?? 2), 10);
+
+    const target = file ? this.findSymbolByName(symbolName, file) : this.findSymbolByName(symbolName);
+    if (!target) return null;
+
+    const callees = this.db
+      .prepare(
+        `
+        SELECT tn.id, tn.name, tn.kind, tn.file, tn.line_start, tn.line_end, tn.signature, e.type
+        FROM code_edges e
+        JOIN code_nodes tn ON tn.id = e.to_id AND tn.tombstoned = 0
+        WHERE e.from_id = ? AND e.dismissed = 0
+        ORDER BY (SELECT COUNT(*) FROM code_edges ce WHERE ce.to_id = tn.id AND ce.dismissed = 0) DESC, tn.name ASC
+        LIMIT ?
+        `
+      )
+      .all(target.id, maxCallees) as Array<{ id: number; name: string; kind: string; file: string; line_start: number; line_end: number; signature: string | null; type: string }>;
+
+    const callers = this.db
+      .prepare(
+        `
+        SELECT fn.id, fn.name, fn.kind, fn.file, fn.line_start, fn.line_end, fn.signature, e.type
+        FROM code_edges e
+        JOIN code_nodes fn ON fn.id = e.from_id AND fn.tombstoned = 0
+        WHERE e.to_id = ? AND e.dismissed = 0
+        ORDER BY (SELECT COUNT(*) FROM code_edges ce WHERE ce.to_id = fn.id AND ce.dismissed = 0) DESC, fn.name ASC
+        LIMIT ?
+        `
+      )
+      .all(target.id, maxCallers) as Array<{ id: number; name: string; kind: string; file: string; line_start: number; line_end: number; signature: string | null; type: string }>;
+
+    const impactRow = this.db
+      .prepare(
+        `
+        WITH RECURSIVE impact(node_id, depth) AS (
+          SELECT ? AS node_id, 0 AS depth
+          UNION
+          SELECT e.from_id, imp.depth + 1
+          FROM code_edges e
+          JOIN impact imp ON e.to_id = imp.node_id
+          JOIN code_nodes fn ON fn.id = e.from_id AND fn.tombstoned = 0
+          WHERE imp.depth < 3 AND e.dismissed = 0
+        )
+        SELECT COUNT(DISTINCT node_id) - 1 AS blast_radius_count FROM impact;
+        `
+      )
+      .get(target.id) as { blast_radius_count: number } | undefined;
+    const blastRadiusCount = Math.max(0, impactRow?.blast_radius_count ?? 0);
+
+    const testCallers = (this.db
+      .prepare(
+        `
+        SELECT COUNT(*) AS c
+        FROM code_edges e
+        JOIN code_nodes fn ON fn.id = e.from_id AND fn.tombstoned = 0
+        WHERE e.to_id = ? AND e.dismissed = 0
+          AND (fn.file LIKE '%.test.%' OR fn.file LIKE '%.spec.%' OR fn.file LIKE '%/test/%' OR fn.file LIKE '%__tests__%')
+        `
+      )
+      .get(target.id) as { c: number } | undefined)?.c ?? 0;
+
+    return {
+      target: this.toGraphNode(target),
+      callees,
+      callers,
+      blast_radius_count: blastRadiusCount,
+      has_test_coverage: testCallers > 0,
+      test_callers_count: testCallers
+    };
   }
 
   public getOverview(topN: number = 10): {

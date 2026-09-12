@@ -18,9 +18,9 @@ const mcpSrc = path.join(root, "build-production");
 if (!existsSync(path.join(mcpSrc, "package.json"))) fail("build-production/ is missing; nothing to release");
 rmSync(path.join(release, "mcp"), { recursive: true, force: true });
 mkdirSync(path.join(release, "mcp"), { recursive: true });
-for (const entry of ["package.json", "README.md", "bin", "src", "examples"]) {
+for (const entry of ["package.json", "README.md", "bin", "src", "wasm", "examples"]) {
   const from = path.join(mcpSrc, entry);
-  if (!existsSync(from)) fail(`build-production/${entry} is missing`);
+  if (!existsSync(from)) continue;
   cpSync(from, path.join(release, "mcp", entry), { recursive: true });
 }
 console.log("[release] mcp/ refreshed from build-production/");
