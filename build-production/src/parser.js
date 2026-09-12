@@ -110,15 +110,8 @@ function nameForNode(language, node) {
     return trait && type ? `${trait} for ${type}` : type ? `impl ${type}` : "impl";
   }
 
-  if (language === "typescript" || language === "typescriptreact") {
-    const identifier = node.descendantsOfType("identifier")[0]?.text;
-    if (identifier) return identifier;
-  }
-
-  if (language === "python") {
-    const identifier = node.descendantsOfType("identifier")[0]?.text;
-    if (identifier) return identifier;
-  }
+  const identifier = node.descendantsOfType(["identifier", "type_identifier", "field_identifier"])[0]?.text;
+  if (identifier) return identifier;
 
   return null;
 }
@@ -196,22 +189,26 @@ export async function parseFile(file, content) {
   const language = languageIdForFile(file);
   if (!language) return null;
 
-  const langEntry = await loadLanguage(language);
-  if (!langEntry) return { language, nodes: [], edges: [] };
+  try {
+    const langEntry = await loadLanguage(language);
+    if (!langEntry) return { language, nodes: [], edges: [] };
 
-  const tree = langEntry.parser.parse(String(content));
-  if (!tree) return { language, nodes: [], edges: [] };
+    const tree = langEntry.parser.parse(String(content));
+    if (!tree) return { language, nodes: [], edges: [] };
 
-  const declarationTypes = DECLARATION_TYPES[language] || [];
-  const declarations = tree.rootNode
-    .descendantsOfType(declarationTypes)
-    .filter((node) => shouldKeepDeclaration(language, node));
+    const declarationTypes = DECLARATION_TYPES[language] || [];
+    const declarations = tree.rootNode
+      .descendantsOfType(declarationTypes)
+      .filter((node) => shouldKeepDeclaration(language, node));
 
-  const nodes = declarations
-    .map((node) => nodeFromSyntax(language, node))
-    .filter((node) => node !== null);
+    const nodes = declarations
+      .map((node) => nodeFromSyntax(language, node))
+      .filter((node) => node !== null);
 
-  return { language, nodes, edges: inferEdges(nodes) };
+    return { language, nodes, edges: inferEdges(nodes) };
+  } catch {
+    return { language, nodes: [], edges: [] };
+  }
 }
 
 export async function readNodeBody(file, content, line) {

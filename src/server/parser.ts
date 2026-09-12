@@ -205,18 +205,9 @@ function nameForNode(language: SupportedLanguageId, node: SyntaxNode): string | 
     return trait && type ? `${trait} for ${type}` : type ? `impl ${type}` : "impl";
   }
 
-  if (language === "typescript" || language === "typescriptreact") {
-    const identifier = node.descendantsOfType("identifier")[0]?.text;
-    if (identifier) {
-      return identifier;
-    }
-  }
-
-  if (language === "python") {
-    const identifier = node.descendantsOfType("identifier")[0]?.text;
-    if (identifier) {
-      return identifier;
-    }
+  const identifier = node.descendantsOfType(["identifier", "type_identifier", "field_identifier"])[0]?.text;
+  if (identifier) {
+    return identifier;
   }
 
   return null;
