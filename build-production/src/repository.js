@@ -12,7 +12,7 @@ export class GraphRepository {
     this.workspaceRoot = workspaceRoot;
   }
 
-  upsertFileIndex(file, nodes, edges, commitHash = "unknown") {
+  upsertFileIndex(file, nodes, edges, commitHash = "unknown", unresolvedCalls = []) {
     const normalizedFile = normalizeWorkspaceFile(this.workspaceRoot, file);
     const tx = this.db.transaction(() => {
       const previousRows = this.db
@@ -82,6 +82,7 @@ export class GraphRepository {
         if (previous.tombstoned === 0 && !currentKeys.has(previous.stable_key)) {
           this.markStale(previous.id, previous.commit_hash, commitHash, "Node deleted");
           this.db.prepare("UPDATE code_nodes SET tombstoned = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(previous.id);
+          this.db.prepare("DELETE FROM code_edges WHERE from_id = ? OR to_id = ?").run(previous.id, previous.id);
         }
       }
 
@@ -119,9 +120,45 @@ export class GraphRepository {
         if (!existingKeys.has(`${d.fromId}:${d.toId}:${d.type}`)) ins.run(d.fromId, d.toId, d.type, normalizedFile);
         edgeCount += 1;
       }
+
+      this.db.prepare("DELETE FROM unresolved_calls WHERE file_context = ?").run(normalizedFile);
+      if (unresolvedCalls && unresolvedCalls.length > 0) {
+        const insUnresolved = this.db.prepare(
+          "INSERT INTO unresolved_calls(from_id, target_name, file_context) VALUES (?, ?, ?)"
+        );
+        for (const u of unresolvedCalls) {
+          const fromKey = keyByIndex.get(u.fromIndex);
+          const fromId = fromKey ? idByKey.get(fromKey) : null;
+          if (fromId) {
+            insUnresolved.run(fromId, u.targetName, normalizedFile);
+          }
+        }
+      }
+
       return { file: normalizedFile, nodes: nodes.length, edges: edgeCount };
     });
     return tx();
+  }
+
+  linkCrossFileCalls() {
+    const stmt = this.db.prepare(`
+      INSERT OR IGNORE INTO code_edges(from_id, to_id, type, confidence, dismissed, file_context, updated_at)
+      SELECT u.from_id, (
+        SELECT n.id FROM code_nodes n
+        WHERE n.name = u.target_name AND n.tombstoned = 0 AND n.file != u.file_context
+          AND n.kind IN ('function', 'class', 'method', 'interface')
+        ORDER BY 
+          (n.file LIKE '%test%' OR n.file LIKE '%spec%' OR n.file LIKE '%mock%' OR n.file LIKE '%fixture%') ASC,
+          ((SELECT COUNT(*) FROM code_edges ce WHERE ce.to_id = n.id AND ce.dismissed = 0) +
+           (SELECT COUNT(*) FROM code_edges ce WHERE ce.from_id = n.id AND ce.dismissed = 0)) DESC,
+          (n.line_end - n.line_start) DESC
+        LIMIT 1
+      ) AS target_id, 'calls', 'syntactic', 0, u.file_context, CURRENT_TIMESTAMP
+      FROM unresolved_calls u
+      WHERE target_id IS NOT NULL
+    `);
+    const res = stmt.run();
+    return res.changes;
   }
 
   querySubgraph(symbol, file, line, depth = 2, maxEdges = 20) {
@@ -212,7 +249,12 @@ export class GraphRepository {
         LEFT JOIN mind_concepts mc ON mc.node_id = n.id
         LEFT JOIN staleness_log sl ON sl.node_id = n.id AND sl.re_verified_at IS NULL
         WHERE n.tombstoned = 0 AND n.file = ? AND n.name = ?
-        ORDER BY (n.line_end - n.line_start) ASC LIMIT 1
+        ORDER BY 
+          (n.file LIKE '%test%' OR n.file LIKE '%spec%' OR n.file LIKE '%mock%' OR n.file LIKE '%fixture%') ASC,
+          ((SELECT COUNT(*) FROM code_edges ce WHERE ce.to_id = n.id AND ce.dismissed = 0) +
+           (SELECT COUNT(*) FROM code_edges ce WHERE ce.from_id = n.id AND ce.dismissed = 0)) DESC,
+          (n.line_end - n.line_start) DESC
+        LIMIT 1
       `).get(nf, name);
       if (inPref) return inPref;
     }
@@ -222,7 +264,12 @@ export class GraphRepository {
       LEFT JOIN mind_concepts mc ON mc.node_id = n.id
       LEFT JOIN staleness_log sl ON sl.node_id = n.id AND sl.re_verified_at IS NULL
       WHERE n.tombstoned = 0 AND n.name = ?
-      ORDER BY (n.line_end - n.line_start) ASC LIMIT 1
+      ORDER BY 
+        (n.file LIKE '%test%' OR n.file LIKE '%spec%' OR n.file LIKE '%mock%' OR n.file LIKE '%fixture%') ASC,
+        ((SELECT COUNT(*) FROM code_edges ce WHERE ce.to_id = n.id AND ce.dismissed = 0) +
+         (SELECT COUNT(*) FROM code_edges ce WHERE ce.from_id = n.id AND ce.dismissed = 0)) DESC,
+        (n.line_end - n.line_start) DESC
+      LIMIT 1
     `).get(name) ?? null;
   }
 
@@ -356,16 +403,16 @@ export class GraphRepository {
     if (!target) return null;
 
     const rows = this.db.prepare(`
-      WITH RECURSIVE impact(node_id, depth, chain) AS (
-        SELECT ? AS node_id, 0 AS depth, CAST(? AS TEXT) AS chain
+      WITH RECURSIVE impact(node_id, depth, chain, visited_ids) AS (
+        SELECT ? AS node_id, 0 AS depth, CAST(? AS TEXT) AS chain, ',' || ? || ',' AS visited_ids
         UNION
-        SELECT e.from_id, imp.depth + 1, fn.name || ' -> ' || imp.chain
+        SELECT e.from_id, imp.depth + 1, fn.name || ' -> ' || imp.chain, imp.visited_ids || fn.id || ','
         FROM code_edges e
         JOIN impact imp ON e.to_id = imp.node_id
         JOIN code_nodes fn ON fn.id = e.from_id AND fn.tombstoned = 0
         WHERE imp.depth < ?
           AND e.dismissed = 0
-          AND imp.chain NOT LIKE '%' || fn.name || '%'
+          AND imp.visited_ids NOT LIKE '%,' || fn.id || ',%'
       )
       SELECT DISTINCT n.id, n.name, n.kind, n.file, n.line_start, n.line_end, imp.depth, imp.chain
       FROM impact imp
@@ -373,7 +420,7 @@ export class GraphRepository {
       WHERE imp.depth > 0
       ORDER BY imp.depth ASC, n.name ASC
       LIMIT 50;
-    `).all(target.id, target.name, Math.min(Math.max(1, maxDepth), 5));
+    `).all(target.id, target.name, target.id, Math.min(Math.max(1, maxDepth), 5));
 
     return {
       target: this.toDto(target),
@@ -396,23 +443,23 @@ export class GraphRepository {
     }
 
     const row = this.db.prepare(`
-      WITH RECURSIVE search_path(curr_id, depth, path_str) AS (
-        SELECT ? AS curr_id, 0 AS depth, CAST(? AS TEXT) AS path_str
+      WITH RECURSIVE search_path(curr_id, depth, path_str, visited_ids) AS (
+        SELECT ? AS curr_id, 0 AS depth, CAST(? AS TEXT) AS path_str, ',' || ? || ',' AS visited_ids
         UNION ALL
-        SELECT e.to_id, sp.depth + 1, sp.path_str || ' -> ' || tn.name
+        SELECT e.to_id, sp.depth + 1, sp.path_str || ' -> ' || tn.name, sp.visited_ids || tn.id || ','
         FROM code_edges e
         JOIN search_path sp ON e.from_id = sp.curr_id
         JOIN code_nodes tn ON tn.id = e.to_id AND tn.tombstoned = 0
         WHERE sp.depth < ?
           AND e.dismissed = 0
-          AND sp.path_str NOT LIKE '%' || tn.name || '%'
+          AND sp.visited_ids NOT LIKE '%,' || tn.id || ',%'
       )
       SELECT path_str, depth
       FROM search_path
       WHERE curr_id = ?
       ORDER BY depth ASC
       LIMIT 1;
-    `).get(fromNode.id, fromNode.name, Math.min(Math.max(1, maxDepth), 8), toNode.id);
+    `).get(fromNode.id, fromNode.name, fromNode.id, Math.min(Math.max(1, maxDepth), 8), toNode.id);
 
     if (!row) {
       return { found: false, reason: `No path found between ${fromSymbol} and ${toSymbol} within depth ${maxDepth}` };

@@ -106,14 +106,21 @@ async function getCommitHash(dir) {
 
 async function getDirtyFiles(dir) {
   try {
-    const { stdout } = await execFileAsync("git", ["status", "--porcelain"], { cwd: dir, windowsHide: true });
+    const { stdout } = await execFileAsync("git", ["status", "--porcelain", "-uall"], { cwd: dir, windowsHide: true });
     const lines = stdout.split(/\r?\n/);
     const files = [];
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed) continue;
-      const filePath = trimmed.slice(2).trim();
-      if (filePath) files.push(filePath);
+      let rawPath = trimmed.slice(2).trim();
+      if (rawPath.includes("->")) {
+        const parts = rawPath.split("->");
+        rawPath = parts[parts.length - 1].trim();
+      }
+      if (rawPath.startsWith('"') && rawPath.endsWith('"')) {
+        rawPath = rawPath.slice(1, -1);
+      }
+      if (rawPath) files.push(rawPath);
     }
     return files;
   } catch {
@@ -165,7 +172,8 @@ function diagnoseMissingSymbol(r, symbol, file, line) {
     if (!lang) {
       return `NON_AST_LANGUAGE: The file "${file}" is not an AST-parseable source file (e.g. Markdown, JSON, configs). CodeGraph tracks structural code symbols.`;
     }
-    const row = r.db.prepare("SELECT COUNT(*) AS c FROM code_nodes WHERE file = ? AND tombstoned = 0").get(file);
+    const relFile = path.relative(r.workspaceRoot, normalized).replace(/\\/g, "/");
+    const row = r.db.prepare("SELECT COUNT(*) AS c FROM code_nodes WHERE file = ? AND tombstoned = 0").get(relFile);
     if (!row || row.c === 0) {
       return `UNINDEXED: The file "${file}" is currently not indexed in graph.db. Run codegraph_index_workspace to index this file.`;
     }
@@ -229,6 +237,22 @@ function guidanceFor(sub) {
   return g;
 }
 
+function sanitizeMermaidLabel(str) {
+  if (!str) return "";
+  return String(str)
+    .replace(/"/g, "#quot;")
+    .replace(/</g, "#lt;")
+    .replace(/>/g, "#gt;")
+    .replace(/\[/g, "#91;")
+    .replace(/\]/g, "#93;")
+    .replace(/\{/g, "#123;")
+    .replace(/\}/g, "#125;");
+}
+
+function sanitizeMermaidId(str) {
+  return String(str).replace(/[^a-zA-Z0-9_]/g, "_") || "node";
+}
+
 function formatExplainResult(result, format) {
   const sym = result.target_symbol;
   const calls = result.calls || [];
@@ -236,16 +260,17 @@ function formatExplainResult(result, format) {
 
   if (format === "mermaid") {
     const lines = ["```mermaid", "graph TD"];
-    const currSafe = sym.name.replace(/[^a-zA-Z0-9_]/g, "_");
-    lines.push(`  CURR["${sym.name} (${sym.kind})"]:::current`);
+    const currSafe = sanitizeMermaidId(sym.name);
+    lines.push(`  ${currSafe}["${sanitizeMermaidLabel(sym.name)} (${sanitizeMermaidLabel(sym.kind)})"]:::current`);
     for (const c of calls.slice(0, 10)) {
-      const safe = c.target_name.replace(/[^a-zA-Z0-9_]/g, "_");
-      lines.push(`  CURR -->|calls| ${safe}["${c.target_name}"]`);
+      const safe = sanitizeMermaidId(c.target_name);
+      lines.push(`  ${currSafe} -->|calls| ${safe}["${sanitizeMermaidLabel(c.target_name)}"]`);
     }
     for (const cb of calledBy.slice(0, 10)) {
-      const safe = cb.source_name.replace(/[^a-zA-Z0-9_]/g, "_");
-      lines.push(`  ${safe}["${cb.source_name}"] -->|calls| CURR`);
+      const safe = sanitizeMermaidId(cb.source_name);
+      lines.push(`  ${safe}["${sanitizeMermaidLabel(cb.source_name)}"] -->|calls| ${currSafe}`);
     }
+    lines.push("  classDef current fill:#4a90e2,stroke:#2a5082,stroke-width:2px,color:#fff;");
     lines.push("```");
     if (result.bounded_source_excerpt) {
       lines.push(`\n**Source excerpt** (${sym.file}:${result.bounded_source_excerpt.line_start}-${result.bounded_source_excerpt.line_end}):\n\`\`\`\n${result.bounded_source_excerpt.text}\n\`\`\``);
@@ -286,14 +311,14 @@ function formatSubgraphResult(sub, format) {
 
   if (format === "mermaid") {
     const lines = ["```mermaid", "graph LR"];
-    const currSafe = sym.name.replace(/[^a-zA-Z0-9_]/g, "_");
+    const currSafe = sanitizeMermaidId(sym.name);
     for (const c of calls) {
-      const safe = c.target_name.replace(/[^a-zA-Z0-9_]/g, "_");
-      lines.push(`  ${currSafe} --> ${safe}`);
+      const safe = sanitizeMermaidId(c.target_name);
+      lines.push(`  ${currSafe}["${sanitizeMermaidLabel(sym.name)}"] --> ${safe}["${sanitizeMermaidLabel(c.target_name)}"]`);
     }
     for (const cb of calledBy) {
-      const safe = cb.source_name.replace(/[^a-zA-Z0-9_]/g, "_");
-      lines.push(`  ${safe} --> ${currSafe}`);
+      const safe = sanitizeMermaidId(cb.source_name);
+      lines.push(`  ${safe}["${sanitizeMermaidLabel(cb.source_name)}"] --> ${currSafe}["${sanitizeMermaidLabel(sym.name)}"]`);
     }
     lines.push("```");
     return lines.join("\n");
@@ -304,8 +329,30 @@ function formatSubgraphResult(sub, format) {
 
 const SKIP = new Set([
   "node_modules", ".git", ".codegraph", ".duckgraph", "dist", "build", "out",
-  ".next", ".svelte-kit", "target", "vendor", "__pycache__", ".venv"
+  ".next", ".svelte-kit", "target", "vendor", "__pycache__", ".venv",
+  "generated", "coverage", ".turbo", ".prisma"
 ]);
+
+function isCandidateSourceFile(full) {
+  const lower = full.toLowerCase();
+  if (lower.endsWith(".min.js") || lower.endsWith(".min.ts") || lower.endsWith(".bundle.js") || lower.endsWith(".d.ts")) {
+    return false;
+  }
+  if (lower.includes("/generated/") || lower.includes("\\generated\\")) {
+    return false;
+  }
+  return Boolean(languageIdForFile(full));
+}
+
+function isMinifiedContent(content) {
+  const lines = content.slice(0, 10000).split(/\r?\n/);
+  if (lines.length === 0) return false;
+  for (const line of lines) {
+    if (line.length > 3000) return true;
+  }
+  const avg = content.length / Math.max(1, lines.length);
+  return avg > 500 && lines.length < 50;
+}
 
 async function collectFiles(maxFiles = 1000, fileFilter = null, r = ensureRepo()) {
   if (fileFilter && Array.isArray(fileFilter)) {
@@ -313,11 +360,11 @@ async function collectFiles(maxFiles = 1000, fileFilter = null, r = ensureRepo()
     for (const rel of fileFilter) {
       if (results.length >= maxFiles) break;
       const full = path.resolve(r.workspaceRoot, rel);
-      if (languageIdForFile(full)) {
+      if (isCandidateSourceFile(full)) {
         const stat = await fs.stat(full).catch(() => null);
         if (!stat || stat.size > 1_000_000) continue;
         const content = await fs.readFile(full, "utf8").catch(() => null);
-        if (content !== null) results.push({ file: full, content });
+        if (content !== null && !isMinifiedContent(content)) results.push({ file: full, content });
       }
     }
     return results;
@@ -336,11 +383,11 @@ async function collectFiles(maxFiles = 1000, fileFilter = null, r = ensureRepo()
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         if (!SKIP.has(entry.name.toLowerCase())) stack.push(full);
-      } else if (entry.isFile() && languageIdForFile(full)) {
+      } else if (entry.isFile() && isCandidateSourceFile(full)) {
         const stat = await fs.stat(full).catch(() => null);
         if (!stat || stat.size > 1_000_000) continue;
         const content = await fs.readFile(full, "utf8").catch(() => null);
-        if (content !== null) results.push({ file: full, content });
+        if (content !== null && !isMinifiedContent(content)) results.push({ file: full, content });
       }
     }
   }
@@ -366,17 +413,21 @@ async function indexWorkspace(args, r = ensureRepo(args.workspace)) {
     const parsed = await parseFile(f.file, f.content);
     if (!parsed || (parsed.nodes.length === 0 && f.content.trim().length > 0)) continue;
     try {
-      const res = r.upsertFileIndex(f.file, parsed.nodes, parsed.edges, commitHash);
+      const res = r.upsertFileIndex(f.file, parsed.nodes, parsed.edges, commitHash, parsed.unresolvedCalls ?? []);
       nodes += res.nodes;
       edges += res.edges;
     } catch { /* skip bad files, keep going */ }
   }
+  const crossFileEdges = r.linkCrossFileCalls();
+  edges += crossFileEdges;
+
   return {
     workspace_root: r.workspaceRoot,
     commit_hash: commitHash,
     indexed_files: files.length,
     nodes,
     edges,
+    cross_file_edges: crossFileEdges,
     max_files: maxFiles,
     truncated: files.length > maxFiles
   };
@@ -763,15 +814,15 @@ server.setRequestHandler(CallToolRequestSchema, async (msg) => {
 
         if (format === "mermaid") {
           const lines = ["graph TD"];
-          const targetSafe = slice.target.name.replace(/[^a-zA-Z0-9_]/g, "_");
-          lines.push(`  ${targetSafe}["${slice.target.name} (${slice.target.kind})"]:::target`);
+          const targetSafe = sanitizeMermaidId(slice.target.name);
+          lines.push(`  ${targetSafe}["${sanitizeMermaidLabel(slice.target.name)} (${sanitizeMermaidLabel(slice.target.kind)})"]:::target`);
           for (const caller of slice.callers) {
-            const callerSafe = caller.name.replace(/[^a-zA-Z0-9_]/g, "_");
-            lines.push(`  ${callerSafe}["${caller.name}"] -->|calls| ${targetSafe}`);
+            const callerSafe = sanitizeMermaidId(caller.name);
+            lines.push(`  ${callerSafe}["${sanitizeMermaidLabel(caller.name)}"] -->|calls| ${targetSafe}`);
           }
           for (const callee of slice.callees) {
-            const calleeSafe = callee.name.replace(/[^a-zA-Z0-9_]/g, "_");
-            lines.push(`  ${targetSafe} -->|calls| ${calleeSafe}["${callee.name}"]`);
+            const calleeSafe = sanitizeMermaidId(callee.name);
+            lines.push(`  ${targetSafe} -->|calls| ${calleeSafe}["${sanitizeMermaidLabel(callee.name)}"]`);
           }
           lines.push("  classDef target fill:#4a90e2,stroke:#2a5082,stroke-width:2px,color:#fff;");
           const mermaidChart = "```mermaid\n" + lines.join("\n") + "\n```";

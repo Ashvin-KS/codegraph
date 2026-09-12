@@ -17,7 +17,7 @@ for (const wasmName of ["tree-sitter.wasm", "web-tree-sitter.wasm"]) {
   }
 }
 
-for (const name of ["rust", "typescript", "tsx", "python", "go", "c", "cpp", "c_sharp", "java", "ruby", "php", "bash", "html", "css", "json", "kotlin", "lua", "solidity", "swift", "yaml"]) {
+for (const name of ["rust", "typescript", "tsx", "python", "go", "c", "cpp", "c_sharp", "java", "ruby", "php", "bash", "html", "css", "json", "kotlin", "lua", "solidity", "swift", "yaml", "zig"]) {
   try {
     copyFileSync(
       require.resolve(`tree-sitter-wasms/out/tree-sitter-${name}.wasm`),

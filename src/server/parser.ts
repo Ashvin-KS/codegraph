@@ -22,10 +22,17 @@ export interface ParsedEdge {
   type: "calls" | "uses_type" | "imports" | "implements" | "mutates" | "re_exports";
 }
 
+export interface UnresolvedCall {
+  fromIndex: number;
+  targetName: string;
+  type: "calls" | "uses_type" | "imports" | "implements" | "mutates" | "re_exports";
+}
+
 export interface ParsedFile {
   language: SupportedLanguageId;
   nodes: ParsedNode[];
   edges: ParsedEdge[];
+  unresolvedCalls?: UnresolvedCall[];
 }
 
 interface TreeSitterLanguage {
@@ -134,10 +141,12 @@ export class CodeParser {
       .map((node) => nodeFromSyntax(languageId, node))
       .filter((node): node is ParsedNode => node !== null);
 
+    const { edges, unresolvedCalls } = inferEdges(nodes);
     return {
       language: languageId,
       nodes,
-      edges: inferEdges(nodes)
+      edges,
+      unresolvedCalls
     };
   }
 
@@ -254,8 +263,9 @@ const CALL_KEYWORDS = new Set([
   "import", "export", "from", "class", "function", "def", "fn", "let", "const", "var"
 ]);
 
-function inferEdges(nodes: ParsedNode[]): ParsedEdge[] {
+function inferEdges(nodes: ParsedNode[]): { edges: ParsedEdge[]; unresolvedCalls: UnresolvedCall[] } {
   const edges: ParsedEdge[] = [];
+  const unresolvedCalls: UnresolvedCall[] = [];
   // Last index wins was a bug for overloads; first wins is deterministic.
   const names = new Map<string, number>();
   for (let index = 0; index < nodes.length; index += 1) {
@@ -276,10 +286,19 @@ function inferEdges(nodes: ParsedNode[]): ParsedEdge[] {
       const toIndex = names.get(targetName);
       if (toIndex !== undefined && toIndex !== fromIndex) {
         edges.push({ fromIndex, toIndex, type: "calls" });
+      } else if (toIndex === undefined) {
+        unresolvedCalls.push({ fromIndex, targetName, type: "calls" });
       }
     }
   }
-  return dedupeEdges(edges);
+  const seenUnresolved = new Set<string>();
+  const dedupedUnresolved = unresolvedCalls.filter((u) => {
+    const key = `${u.fromIndex}:${u.targetName}:${u.type}`;
+    if (seenUnresolved.has(key)) return false;
+    seenUnresolved.add(key);
+    return true;
+  });
+  return { edges: dedupeEdges(edges), unresolvedCalls: dedupedUnresolved };
 }
 
 function dedupeEdges(edges: ParsedEdge[]): ParsedEdge[] {

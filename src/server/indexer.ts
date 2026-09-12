@@ -30,7 +30,7 @@ export class Indexer {
       return { file, nodes: 0, edges: 0 };
     }
     const commit = await currentCommitHash(this.workspaceRoot);
-    return this.repository.upsertFileIndex(file, parsed.nodes, parsed.edges, commit);
+    return this.repository.upsertFileIndex(file, parsed.nodes, parsed.edges, commit, parsed.unresolvedCalls ?? []);
   }
 
   public async indexBatch(files: Array<{ file: string; content?: string }>, chunkSize = 50): Promise<{ files: number; nodes: number; edges: number }> {
@@ -63,6 +63,7 @@ export class Indexer {
         }
         await yieldImmediate();
       }
+      this.repository.linkCrossFileCalls();
       this.repository.finishIndexRun(runId, nodes, "ready");
       return { files: processedFiles, nodes, edges };
     } catch (error) {

@@ -236,5 +236,75 @@ export function total(values: number[]): number {
 
     db.close();
   });
+
+  it("links cross-file calls and handles CTE substring collisions and tombstone edge purges", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "duckgraph-crossfile-"));
+    tempDirs.push(root);
+    const db = openDuckDatabase(path.join(root, ".duckgraph", "graph.db"));
+    const repository = new GraphRepository(db, root);
+    const parser = new CodeParser(process.cwd(), createLogger("repo-test"));
+
+    // File 1: Service definition (init and initialize - substring test)
+    const file1 = `
+export function init(): void {}
+export function initialize(): void {
+  init();
+}
+`;
+    // File 2: App calling initialize across files
+    const file2 = `
+export function app(): void {
+  initialize();
+}
+`;
+    const p1 = await parser.parseFile("service.ts", file1);
+    const p2 = await parser.parseFile("app.ts", file2);
+    expect(p1).not.toBeNull();
+    expect(p2).not.toBeNull();
+
+    repository.upsertFileIndex("service.ts", p1!.nodes, p1!.edges, "c1", p1!.unresolvedCalls ?? []);
+    repository.upsertFileIndex("app.ts", p2!.nodes, p2!.edges, "c1", p2!.unresolvedCalls ?? []);
+
+    // Perform cross-file linking
+    const crossLinked = repository.linkCrossFileCalls();
+    expect(crossLinked).toBeGreaterThanOrEqual(1);
+
+    // Verify cross-file edge exists from app() to initialize()
+    const appEdges = db.prepare(`
+      SELECT e.type, fn.name AS from_name, tn.name AS to_name, fn.file AS from_file, tn.file AS to_file
+      FROM code_edges e
+      JOIN code_nodes fn ON fn.id = e.from_id
+      JOIN code_nodes tn ON tn.id = e.to_id
+      WHERE fn.name = 'app'
+    `).all() as Array<{ from_name: string; to_name: string; from_file: string; to_file: string }>;
+
+    expect(appEdges.some((e) => e.to_name === "initialize" && e.from_file !== e.to_file)).toBe(true);
+
+    // Verify CTE substring collision fix (init vs initialize)
+    // init is called by initialize, initialize is called by app
+    const impact = repository.getImpactAnalysis("init");
+    expect(impact).not.toBeNull();
+    const depNames = impact!.dependents.map((d) => d.name);
+    // Even though 'init' is a substring of 'initialize', cycle detection using IDs must NOT drop initialize or app
+    expect(depNames).toContain("initialize");
+    expect(depNames).toContain("app");
+
+    // Shortest path app -> init
+    const pathRes = repository.findShortestPath("app", "init");
+    expect(pathRes.found).toBe(true);
+    expect(pathRes.path).toEqual(["app", "initialize", "init"]);
+
+    // Verify tombstone deletes orphan edges
+    // Update app.ts removing 'app' function
+    const p2Empty = await parser.parseFile("app.ts", "// empty");
+    repository.upsertFileIndex("app.ts", p2Empty!.nodes, p2Empty!.edges, "c2", []);
+
+    const remainingEdges = db.prepare(`
+      SELECT COUNT(*) as c FROM code_edges WHERE file_context = 'app.ts'
+    `).get() as { c: number };
+    expect(remainingEdges.c).toBe(0);
+
+    db.close();
+  });
 });
 

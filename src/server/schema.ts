@@ -137,6 +137,17 @@ export function migrate(db: Database.Database): void {
         error TEXT
       );
 
+      CREATE TABLE IF NOT EXISTS unresolved_calls (
+        id INTEGER PRIMARY KEY,
+        from_id INTEGER NOT NULL,
+        target_name TEXT NOT NULL,
+        file_context TEXT NOT NULL,
+        FOREIGN KEY (from_id) REFERENCES code_nodes(id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_unresolved_target ON unresolved_calls(target_name);
+      CREATE INDEX IF NOT EXISTS idx_unresolved_file ON unresolved_calls(file_context);
+
       INSERT INTO schema_migrations(version) VALUES (${MIGRATION_VERSION});
     `);
   }

@@ -10,3 +10,4 @@ coverage/
 !release/*.vsix
 dist/
 media/d3.min.js
+scratch/

@@ -158,6 +158,7 @@ const CALL_KEYWORDS = new Set([
 
 function inferEdges(nodes) {
   const edges = [];
+  const unresolvedCalls = [];
   const names = new Map();
   for (let i = 0; i < nodes.length; i += 1) {
     const n = nodes[i];
@@ -173,16 +174,26 @@ function inferEdges(nodes) {
       const to = names.get(target);
       if (to !== undefined && to !== from) {
         edges.push({ fromIndex: from, toIndex: to, type: "calls" });
+      } else if (to === undefined) {
+        unresolvedCalls.push({ fromIndex: from, targetName: target, type: "calls" });
       }
     }
   }
   const seen = new Set();
-  return edges.filter((e) => {
+  const filteredEdges = edges.filter((e) => {
     const k = `${e.fromIndex}:${e.toIndex}:${e.type}`;
     if (seen.has(k)) return false;
     seen.add(k);
     return true;
   });
+  const seenUnresolved = new Set();
+  const filteredUnresolved = unresolvedCalls.filter((u) => {
+    const k = `${u.fromIndex}:${u.targetName}:${u.type}`;
+    if (seenUnresolved.has(k)) return false;
+    seenUnresolved.add(k);
+    return true;
+  });
+  return { edges: filteredEdges, unresolvedCalls: filteredUnresolved };
 }
 
 export async function parseFile(file, content) {
@@ -191,10 +202,10 @@ export async function parseFile(file, content) {
 
   try {
     const langEntry = await loadLanguage(language);
-    if (!langEntry) return { language, nodes: [], edges: [] };
+    if (!langEntry) return { language, nodes: [], edges: [], unresolvedCalls: [] };
 
     const tree = langEntry.parser.parse(String(content));
-    if (!tree) return { language, nodes: [], edges: [] };
+    if (!tree) return { language, nodes: [], edges: [], unresolvedCalls: [] };
 
     const declarationTypes = DECLARATION_TYPES[language] || [];
     const declarations = tree.rootNode
@@ -205,9 +216,10 @@ export async function parseFile(file, content) {
       .map((node) => nodeFromSyntax(language, node))
       .filter((node) => node !== null);
 
-    return { language, nodes, edges: inferEdges(nodes) };
+    const { edges, unresolvedCalls } = inferEdges(nodes);
+    return { language, nodes, edges, unresolvedCalls };
   } catch {
-    return { language, nodes: [], edges: [] };
+    return { language, nodes: [], edges: [], unresolvedCalls: [] };
   }
 }
 
